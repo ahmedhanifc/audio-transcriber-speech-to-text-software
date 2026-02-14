@@ -37,11 +37,34 @@ ui_queue = queue.Queue()  # send messages to the tkinter main thread
 # ── Audio Recording ─────────────────────────────────────────────────────────────
 stream = None
 
+def get_builtin_mic_device():
+    """Find and return the built-in MacBook microphone device index."""
+    devices = sd.query_devices()
+    
+    # Search for built-in microphone
+    for idx, device in enumerate(devices):
+        device_name = device['name'].lower()
+        print()
+        # Look for MacBook built-in mic keywords
+        if any(keyword in device_name for keyword in ['macbook', 'built-in', 'internal']):
+            if device['max_input_channels'] > 0:  # Ensure it's an input device
+                print(f"✓ Found built-in mic: {device['name']} (device {idx})")
+                return idx
+    
+    # Fallback to default if built-in not found
+    print("⚠️  Built-in mic not found, using default input device")
+    return None
+
 def start_recording():
     global is_recording, audio_frames, stream
     audio_frames = []
     is_recording = True
+    
+    # Get the built-in microphone device
+    builtin_mic = get_builtin_mic_device()
+    
     stream = sd.InputStream(
+        device=builtin_mic,  # Explicitly use built-in mic
         samplerate=SAMPLE_RATE,
         channels=CHANNELS,
         dtype=DTYPE,
@@ -90,35 +113,21 @@ def _process_audio():
         wf.setframerate(SAMPLE_RATE)
         wf.writeframes(audio_data.tobytes())
 
-    # Step 1: Whisper transcription
+    # Transcription with cleanup prompt (single API call)
     with open(tmp.name, "rb") as audio_file:
         transcript = client.audio.transcriptions.create(
-            model="whisper-1",
+            model="gpt-4o-transcribe",
             file=audio_file,
+            language="en",  # English-only for better accuracy
+            # prompt=(
+            #     "Clean transcription. Remove filler words (um, uh, like, you know). "
+            #     "Use proper punctuation and grammar. "
+            #     "If the speaker corrects themselves, keep only the corrected version."
+            # ),
         )
-    raw_text = transcript.text
-    print("Raw text: ", raw_text)
+    final_text = transcript.text.strip()
+    print("Transcribed text: ", final_text)
     os.unlink(tmp.name)  # clean up temp file
-
-    # Step 2: GPT cleanup
-    cleaned = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a text cleanup assistant. "
-                    "Fix grammar and punctuation in the following transcribed speech. "
-                    "Do not change the meaning or add new content. "
-                    "Return only the cleaned text, nothing else."
-                ),
-            },
-            {"role": "user", "content": raw_text},
-        ],
-    )
-    final_text = cleaned.choices[0].message.content.strip()
-    print("Cleaned text: ", final_text)
-
     # Step 3: Paste at cursor
     pyperclip.copy(final_text)
     # Small delay to let clipboard settle, then simulate Cmd+V
@@ -150,51 +159,140 @@ def on_release(key):
 
 # ── Tkinter UI (floating indicator) ─────────────────────────────────────────────
 class Indicator:
-    """Tiny floating dot at bottom-center of screen."""
+    """Minimal pill-shaped indicator at bottom-center with hover expansion."""
 
     def __init__(self, root):
         self.root = root
         self.root.title("")
         self.root.overrideredirect(True)           # no title bar
         self.root.attributes("-topmost", True)      # always on top
-        self.root.attributes("-alpha", 0.85)        # slight transparency
-        self.root.configure(bg="black")
+        self.root.attributes("-alpha", 0.9)         # slight transparency
+        self.root.configure(bg="gray20")
+
+        # Create a frame for rounded appearance
+        self.frame = tk.Frame(root, bg="gray20", highlightthickness=0)
+        self.frame.pack(fill="both", expand=True)
 
         self.label = tk.Label(
-            root,
-            text="  🎙 Ready  ",
-            font=("SF Pro", 14),
+            self.frame,
+            text="",  # Start with no text (just a pill)
+            font=("SF Pro", 11),
             fg="white",
-            bg="#1a1a1a",
-            padx=12,
-            pady=6,
+            bg="gray20",
+            padx=0,
+            pady=0,
         )
         self.label.pack()
 
-        # Position at bottom center
-        self.root.update_idletasks()
-        screen_w = self.root.winfo_screenwidth()
-        screen_h = self.root.winfo_screenheight()
-        win_w = self.root.winfo_width()
-        x = (screen_w - win_w) // 2
-        y = screen_h - 150
-        self.root.geometry(f"+{x}+{y}")
-
+        # State tracking
+        self.current_state = "idle"
+        self.is_hovered = False
+        
+        # Position at bottom center - start as small pill
+        self.screen_w = self.root.winfo_screenwidth()
+        self.screen_h = self.root.winfo_screenheight()
+        
+        # Bind hover events
+        self.root.bind("<Enter>", self._on_hover_enter)
+        self.root.bind("<Leave>", self._on_hover_leave)
+        self.label.bind("<Enter>", self._on_hover_enter)
+        self.label.bind("<Leave>", self._on_hover_leave)
+        
+        self._set_idle_geometry()
         self._poll_queue()
+
+    def _on_hover_enter(self, event=None):
+        """Handle mouse entering the indicator."""
+        self.is_hovered = True
+        self._update_display()
+
+    def _on_hover_leave(self, event=None):
+        """Handle mouse leaving the indicator."""
+        self.is_hovered = False
+        self._update_display()
+
+    def _set_idle_geometry(self):
+        """Set geometry for idle state - small pill shape."""
+        if self.is_hovered:
+            # Expanded on hover
+            line_width = 120
+            line_height = 20
+        else:
+            # Minimal pill
+            line_width = 60
+            line_height = 3
+        
+        x = (self.screen_w - line_width) // 2
+        y = self.screen_h - 120
+        self.root.geometry(f"{line_width}x{line_height}+{x}+{y}")
+
+    def _set_active_geometry(self):
+        """Set geometry for active state - expanded with text."""
+        self.root.update_idletasks()
+        win_w = max(self.label.winfo_reqwidth(), 140)
+        win_h = max(self.label.winfo_reqheight(), 24)
+        x = (self.screen_w - win_w) // 2
+        y = self.screen_h - 120
+        self.root.geometry(f"{win_w}x{win_h}+{x}+{y}")
+
+    def _update_display(self):
+        """Update the display based on current state and hover."""
+        if self.current_state == "recording":
+            self.label.config(
+                text="  🔴 Recording...  ",
+                bg="#DC143C",
+                fg="white",
+                padx=10,
+                pady=4,
+                font=("SF Pro", 11)
+            )
+            self.root.configure(bg="#DC143C")
+            self.frame.configure(bg="#DC143C")
+            self._set_active_geometry()
+        elif self.current_state == "processing":
+            self.label.config(
+                text="  ⏳ Processing...  ",
+                bg="#2C2C2E",
+                fg="white",
+                padx=10,
+                pady=4,
+                font=("SF Pro", 11)
+            )
+            self.root.configure(bg="#2C2C2E")
+            self.frame.configure(bg="#2C2C2E")
+            self._set_active_geometry()
+        elif self.current_state == "idle":
+            if self.is_hovered:
+                # Show text on hover
+                self.label.config(
+                    text="  Ready  ",
+                    bg="#4A4A4C",
+                    fg="white",
+                    padx=8,
+                    pady=3,
+                    font=("SF Pro", 10)
+                )
+                self.root.configure(bg="#4A4A4C")
+                self.frame.configure(bg="#4A4A4C")
+            else:
+                # Minimal pill
+                self.label.config(
+                    text="",
+                    bg="gray20",
+                    fg="white",
+                    padx=0,
+                    pady=0
+                )
+                self.root.configure(bg="gray20")
+                self.frame.configure(bg="gray20")
+            self._set_idle_geometry()
 
     def _poll_queue(self):
         """Check the UI queue for state changes."""
         while not ui_queue.empty():
             state = ui_queue.get_nowait()
-            if state == "recording":
-                self.label.config(text="  🔴 Recording...  ", bg="#8B0000", fg="white")
-                self.root.configure(bg="#8B0000")
-            elif state == "processing":
-                self.label.config(text="  ⏳ Processing...  ", bg="#333333", fg="white")
-                self.root.configure(bg="#333333")
-            elif state == "idle":
-                self.label.config(text="  🎙 Ready  ", bg="#1a1a1a", fg="white")
-                self.root.configure(bg="#1a1a1a")
+            self.current_state = state
+            self._update_display()
 
         self.root.after(100, self._poll_queue)  # poll every 100ms
 
@@ -205,7 +303,16 @@ def main():
     print("Hold Right ⌘ (Command) to record. Release to transcribe & paste.")
     print("Close the indicator window or Ctrl+C to quit.")
     print(f"\n🎤 Audio devices:")
-    print(f"   Default input: {sd.query_devices(kind='input')['name']}")
+    print(f"   System default input: {sd.query_devices(kind='input')['name']}")
+    
+    # Show which device will actually be used
+    builtin_idx = get_builtin_mic_device()
+    if builtin_idx is not None:
+        builtin_name = sd.query_devices(builtin_idx)['name']
+        print(f"   Using for recording: {builtin_name} ✓")
+    else:
+        print(f"   Using for recording: (system default)")
+    
     print(f"   Sample rate: {SAMPLE_RATE}Hz, Channels: {CHANNELS}\n")
 
     # Start the key listener in a background thread
@@ -222,3 +329,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
