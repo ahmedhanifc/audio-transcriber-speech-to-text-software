@@ -1,0 +1,71 @@
+{
+    "type": "object",
+    "properties": {
+        "metric_human_name": {
+            "type": "string",
+            "description": "A simple, human-readable title for the section (e.g. 'Direct Impact')"
+        },
+        "question_1_qualitative": {
+            "type": "object",
+            "properties": {
+                "question_text": {
+                    "type": "string"
+                },
+                "helper_text": {
+                    "type": "string",
+                    "description": "The 'For example...' text"
+                }
+            },
+            "required": [
+                "question_text",
+                "helper_text"
+            ],
+            "additionalProperties": false
+        },
+        "question_2_quantitative": {
+            "type": "object",
+            "properties": {
+                "question_text": {
+                    "type": "string"
+                },
+                "constraint_note": {
+                    "type": "string",
+                    "description": "What to EXCLUDE based on rules"
+                },
+                "unit": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "question_text",
+                "constraint_note",
+                "unit"
+            ],
+            "additionalProperties": false
+        },
+        "question_3_verification": {
+            "type": "object",
+            "properties": {
+                "question_text": {
+                    "type": "string"
+                },
+                "guidance_text": {
+                    "type": "string",
+                    "description": "Examples of valid verification proofs"
+                }
+            },
+            "required": [
+                "question_text",
+                "guidance_text"
+            ],
+            "additionalProperties": false
+        }
+    },
+    "required": [
+        "metric_human_name",
+        "question_1_qualitative",
+        "question_2_quantitative",
+        "question_3_verification"
+    ],
+    "additionalProperties": false
+}
