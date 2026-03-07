@@ -4,3 +4,4 @@ numpy
 openai
 pyperclip
 python-dotenv
+

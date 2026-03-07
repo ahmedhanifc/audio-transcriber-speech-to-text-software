@@ -29,9 +29,10 @@ client = OpenAI()         # picks up OPENAI_API_KEY from .env
 kb = KeyboardController() # for simulating Cmd+V paste
 
 # ── Shared State ────────────────────────────────────────────────────────────────
-audio_frames = []         # list of numpy chunks recorded
+audio_frames = []          # list of numpy chunks recorded
 is_recording = False
-ui_queue = queue.Queue()  # send messages to the tkinter main thread
+recording_mode = None      # "hold" or "toggle"
+ui_queue = queue.Queue()   # send messages to the tkinter main thread
 
 
 # ── Audio Recording ─────────────────────────────────────────────────────────────
@@ -55,10 +56,14 @@ def get_builtin_mic_device():
     print("⚠️  Built-in mic not found, using default input device")
     return None
 
-def start_recording():
-    global is_recording, audio_frames, stream
+def start_recording(mode="hold"):
+    global is_recording, audio_frames, stream, recording_mode
+    if is_recording:
+        return False
+
     audio_frames = []
     is_recording = True
+    recording_mode = mode
     
     # Get the built-in microphone device
     builtin_mic = get_builtin_mic_device()
@@ -72,15 +77,20 @@ def start_recording():
     )
     stream.start()
     print("🔴 Recording started...")
-    ui_queue.put("recording")
+    ui_queue.put("recording_locked" if mode == "toggle" else "recording")
+    return True
 
 def _audio_callback(indata, frames, time_info, status):
     if is_recording:
         audio_frames.append(indata.copy())
 
 def stop_recording():
-    global is_recording, stream
+    global is_recording, stream, recording_mode
+    if not is_recording:
+        return False
+
     is_recording = False
+    recording_mode = None
     if stream:
         stream.stop()
         stream.close()
@@ -88,6 +98,7 @@ def stop_recording():
     print("⏹ Recording stopped. Processing...")
     ui_queue.put("processing")
     threading.Thread(target=_process_audio, daemon=True).start()
+    return True
 
 
 # ── Processing Pipeline ─────────────────────────────────────────────────────────
@@ -148,13 +159,21 @@ def on_press(key):
     global cmd_held
     if key == Key.cmd_r and not cmd_held:
         cmd_held = True
-        start_recording()
+        if not is_recording:
+            start_recording(mode="hold")
+    elif key == Key.shift_r:
+        if is_recording:
+            if recording_mode == "toggle":
+                stop_recording()
+        else:
+            start_recording(mode="toggle")
 
 def on_release(key):
     global cmd_held
     if key == Key.cmd_r and cmd_held:
         cmd_held = False
-        stop_recording()
+        if is_recording and recording_mode == "hold":
+            stop_recording()
 
 
 # ── Tkinter UI (floating indicator) ─────────────────────────────────────────────
@@ -249,6 +268,18 @@ class Indicator:
             self.root.configure(bg="#DC143C")
             self.frame.configure(bg="#DC143C")
             self._set_active_geometry()
+        elif self.current_state == "recording_locked":
+            self.label.config(
+                text="  🔒 Listening...  ",
+                bg="#B22222",
+                fg="white",
+                padx=10,
+                pady=4,
+                font=("SF Pro", 11)
+            )
+            self.root.configure(bg="#B22222")
+            self.frame.configure(bg="#B22222")
+            self._set_active_geometry()
         elif self.current_state == "processing":
             self.label.config(
                 text="  ⏳ Processing...  ",
@@ -301,6 +332,7 @@ class Indicator:
 def main():
     print("Audio LLM Transcriber")
     print("Hold Right ⌘ (Command) to record. Release to transcribe & paste.")
+    print("Press Right Shift once to latch recording on. Press it again to stop.")
     print("Close the indicator window or Ctrl+C to quit.")
     print(f"\n🎤 Audio devices:")
     print(f"   System default input: {sd.query_devices(kind='input')['name']}")
@@ -329,4 +361,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
