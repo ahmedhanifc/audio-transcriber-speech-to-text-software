@@ -1,5 +1,0 @@
-openai
-pyperclip
-pynput
-python-dotenv
- 
