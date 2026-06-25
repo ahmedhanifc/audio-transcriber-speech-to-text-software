@@ -4,4 +4,4 @@ numpy
 openai
 pyperclip
 python-dotenv
-
+pyinstaller

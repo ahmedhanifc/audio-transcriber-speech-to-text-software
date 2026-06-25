@@ -8,7 +8,10 @@ import queue
 import wave
 import tempfile
 import os
+import sys
 import tkinter as tk
+from pathlib import Path
+import logging
 
 import numpy as np
 import sounddevice as sd
@@ -18,15 +21,36 @@ from pynput.keyboard import Key, Controller as KeyboardController
 from openai import OpenAI
 from dotenv import load_dotenv
 
+# ── Platform Detection ──────────────────────────────────────────────────────────
+IS_WINDOWS = sys.platform.startswith("win")
+IS_MACOS = sys.platform.startswith("darwin")
+
 # ── Config ──────────────────────────────────────────────────────────────────────
 load_dotenv()
+USER_ENV_PATH = Path.home() / ".audio-transcriber" / ".env"
+load_dotenv(USER_ENV_PATH, override=True)
+
+LOG_PATH = Path.home() / "Library" / "Logs" / "Audio Transcriber.log"
+LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+logging.basicConfig(
+    filename=LOG_PATH,
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+
+if not os.getenv("OPENAI_API_KEY"):
+    raise RuntimeError(
+        "OPENAI_API_KEY is missing. Add it to ~/.audio-transcriber/.env"
+    )
 
 SAMPLE_RATE = 16000      # 16kHz mono — perfect for Whisper
 CHANNELS = 1
 DTYPE = "int16"
 
 client = OpenAI()         # picks up OPENAI_API_KEY from .env
-kb = KeyboardController() # for simulating Cmd+V paste
+kb = KeyboardController() # for simulating paste
+# Platform-specific modifier key for paste
+paste_modifier = Key.ctrl if IS_WINDOWS else Key.cmd
 
 # ── Shared State ────────────────────────────────────────────────────────────────
 audio_frames = []          # list of numpy chunks recorded
@@ -38,22 +62,33 @@ ui_queue = queue.Queue()   # send messages to the tkinter main thread
 # ── Audio Recording ─────────────────────────────────────────────────────────────
 stream = None
 
+def log(message):
+    """Print a message and save it to the app log file."""
+    print(message)
+    logging.info(message)
+
 def get_builtin_mic_device():
-    """Find and return the built-in MacBook microphone device index."""
+    """Find and return the built-in microphone device index (cross-platform)."""
     devices = sd.query_devices()
     
-    # Search for built-in microphone
+    # Platform-specific keywords for built-in mics
+    if IS_WINDOWS:
+        keywords = ['realtek', 'conexant', 'id', 'high definition audio', 'microphone']
+    elif IS_MACOS:
+        keywords = ['macbook', 'built-in', 'internal']
+    else:  # Linux and others
+        keywords = ['built-in', 'internal', 'alsa', 'pulse']
+    
+    # Search for built-in mic
     for idx, device in enumerate(devices):
         device_name = device['name'].lower()
-        print()
-        # Look for MacBook built-in mic keywords
-        if any(keyword in device_name for keyword in ['macbook', 'built-in', 'internal']):
+        if any(keyword in device_name for keyword in keywords):
             if device['max_input_channels'] > 0:  # Ensure it's an input device
-                print(f"✓ Found built-in mic: {device['name']} (device {idx})")
+                log(f"Found built-in mic: {device['name']} (device {idx})")
                 return idx
     
     # Fallback to default if built-in not found
-    print("⚠️  Built-in mic not found, using default input device")
+    log("Built-in mic not found, using default input device")
     return None
 
 def start_recording(mode="hold"):
@@ -76,7 +111,7 @@ def start_recording(mode="hold"):
         callback=_audio_callback,
     )
     stream.start()
-    print("🔴 Recording started...")
+    log("Recording started...")
     ui_queue.put("recording_locked" if mode == "toggle" else "recording")
     return True
 
@@ -95,7 +130,7 @@ def stop_recording():
         stream.stop()
         stream.close()
         stream = None
-    print("⏹ Recording stopped. Processing...")
+    log("Recording stopped. Processing...")
     ui_queue.put("processing")
     threading.Thread(target=_process_audio, daemon=True).start()
     return True
@@ -103,77 +138,78 @@ def stop_recording():
 
 # ── Processing Pipeline ─────────────────────────────────────────────────────────
 def _process_audio():
-    if not audio_frames:
+    try:
+        if not audio_frames:
+            ui_queue.put("idle")
+            return
+
+        # Save recorded audio to a temp .wav file
+        audio_data = np.concatenate(audio_frames, axis=0)
+
+        # Diagnostics
+        duration = len(audio_data) / SAMPLE_RATE
+        rms = np.sqrt(np.mean(audio_data.astype(np.float32) ** 2))
+        log(f"Audio: {duration:.1f}s duration, {len(audio_frames)} chunks, RMS volume: {rms:.0f}")
+        if rms < 50:
+            log("Very low volume - mic may not be capturing audio!")
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        with wave.open(tmp.name, "wb") as wf:
+            wf.setnchannels(CHANNELS)
+            wf.setsampwidth(2)  # int16 = 2 bytes
+            wf.setframerate(SAMPLE_RATE)
+            wf.writeframes(audio_data.tobytes())
+
+        # Transcription with cleanup prompt (single API call)
+        with open(tmp.name, "rb") as audio_file:
+            transcript = client.audio.transcriptions.create(
+                model="gpt-4o-transcribe",
+                file=audio_file,
+                language="en",  # English-only for better accuracy
+                # prompt=(
+                #     "Clean transcription. Remove filler words (um, uh, like, you know). "
+                #     "Use proper punctuation and grammar. "
+                #     "If the speaker corrects themselves, keep only the corrected version."
+                # ),
+            )
+        final_text = transcript.text.strip()
+        log(f"Transcribed text: {final_text}")
+        os.unlink(tmp.name)  # clean up temp file
+        # Step 3: Paste at cursor
+        pyperclip.copy(final_text)
+        # Small delay to let clipboard settle, then simulate paste (Ctrl+V on Windows, Cmd+V on macOS)
+        import time
+        time.sleep(0.05)
+        kb.press(paste_modifier)
+        kb.press("v")
+        kb.release("v")
+        kb.release(paste_modifier)
+
         ui_queue.put("idle")
-        return
-
-    # Save recorded audio to a temp .wav file
-    audio_data = np.concatenate(audio_frames, axis=0)
-
-    # Diagnostics
-    duration = len(audio_data) / SAMPLE_RATE
-    rms = np.sqrt(np.mean(audio_data.astype(np.float32) ** 2))
-    print(f"📊 Audio: {duration:.1f}s duration, {len(audio_frames)} chunks, RMS volume: {rms:.0f}")
-    if rms < 50:
-        print("⚠️  Very low volume — mic may not be capturing audio!")
-
-    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    with wave.open(tmp.name, "wb") as wf:
-        wf.setnchannels(CHANNELS)
-        wf.setsampwidth(2)  # int16 = 2 bytes
-        wf.setframerate(SAMPLE_RATE)
-        wf.writeframes(audio_data.tobytes())
-
-    # Transcription with cleanup prompt (single API call)
-    with open(tmp.name, "rb") as audio_file:
-        transcript = client.audio.transcriptions.create(
-            model="gpt-4o-transcribe",
-            file=audio_file,
-            language="en",  # English-only for better accuracy
-            # prompt=(
-            #     "Clean transcription. Remove filler words (um, uh, like, you know). "
-            #     "Use proper punctuation and grammar. "
-            #     "If the speaker corrects themselves, keep only the corrected version."
-            # ),
-        )
-    final_text = transcript.text.strip()
-    print("Transcribed text: ", final_text)
-    os.unlink(tmp.name)  # clean up temp file
-    # Step 3: Paste at cursor
-    pyperclip.copy(final_text)
-    # Small delay to let clipboard settle, then simulate Cmd+V
-    import time
-    time.sleep(0.05)
-    kb.press(Key.cmd)
-    kb.press("v")
-    kb.release("v")
-    kb.release(Key.cmd)
-
-    ui_queue.put("idle")
+    except Exception:
+        logging.exception("Failed to process audio")
+        ui_queue.put("idle")
+        raise
 
 
 # ── Key Listener ─────────────────────────────────────────────────────────────────
 cmd_held = False
+# Platform-specific recording toggle key (Ctrl+R on Windows, Cmd+R on macOS)
+recording_key = Key.ctrl_r if IS_WINDOWS else Key.cmd_r
 
 def on_press(key):
     global cmd_held
-    if key == Key.cmd_r and not cmd_held:
+    if key == recording_key and not cmd_held:
         cmd_held = True
-        if not is_recording:
-            start_recording(mode="hold")
-    elif key == Key.shift_r:
         if is_recording:
-            if recording_mode == "toggle":
-                stop_recording()
+            stop_recording()
         else:
             start_recording(mode="toggle")
 
 def on_release(key):
     global cmd_held
-    if key == Key.cmd_r and cmd_held:
+    if key == recording_key:
         cmd_held = False
-        if is_recording and recording_mode == "hold":
-            stop_recording()
 
 
 # ── Tkinter UI (floating indicator) ─────────────────────────────────────────────
@@ -188,6 +224,17 @@ class Indicator:
         self.root.attributes("-alpha", 0.9)         # slight transparency
         self.root.configure(bg="gray20")
 
+        # Cross-platform font setup
+        if IS_MACOS:
+            self.ui_font = ("SF Pro", 11)
+            self.ui_font_small = ("SF Pro", 10)
+        elif IS_WINDOWS:
+            self.ui_font = ("Segoe UI", 11)
+            self.ui_font_small = ("Segoe UI", 10)
+        else:
+            self.ui_font = ("sans-serif", 11)
+            self.ui_font_small = ("sans-serif", 10)
+        
         # Create a frame for rounded appearance
         self.frame = tk.Frame(root, bg="gray20", highlightthickness=0)
         self.frame.pack(fill="both", expand=True)
@@ -195,7 +242,7 @@ class Indicator:
         self.label = tk.Label(
             self.frame,
             text="",  # Start with no text (just a pill)
-            font=("SF Pro", 11),
+            font=self.ui_font,
             fg="white",
             bg="gray20",
             padx=0,
@@ -242,7 +289,7 @@ class Indicator:
             line_height = 3
         
         x = (self.screen_w - line_width) // 2
-        y = self.screen_h - 120
+        y = self.screen_h - 60
         self.root.geometry(f"{line_width}x{line_height}+{x}+{y}")
 
     def _set_active_geometry(self):
@@ -251,7 +298,7 @@ class Indicator:
         win_w = max(self.label.winfo_reqwidth(), 140)
         win_h = max(self.label.winfo_reqheight(), 24)
         x = (self.screen_w - win_w) // 2
-        y = self.screen_h - 120
+        y = self.screen_h - 60
         self.root.geometry(f"{win_w}x{win_h}+{x}+{y}")
 
     def _update_display(self):
@@ -263,7 +310,7 @@ class Indicator:
                 fg="white",
                 padx=10,
                 pady=4,
-                font=("SF Pro", 11)
+                font=self.ui_font
             )
             self.root.configure(bg="#DC143C")
             self.frame.configure(bg="#DC143C")
@@ -275,7 +322,7 @@ class Indicator:
                 fg="white",
                 padx=10,
                 pady=4,
-                font=("SF Pro", 11)
+                font=self.ui_font
             )
             self.root.configure(bg="#B22222")
             self.frame.configure(bg="#B22222")
@@ -287,7 +334,7 @@ class Indicator:
                 fg="white",
                 padx=10,
                 pady=4,
-                font=("SF Pro", 11)
+                font=self.ui_font
             )
             self.root.configure(bg="#2C2C2E")
             self.frame.configure(bg="#2C2C2E")
@@ -301,7 +348,7 @@ class Indicator:
                     fg="white",
                     padx=8,
                     pady=3,
-                    font=("SF Pro", 10)
+                    font=self.ui_font_small
                 )
                 self.root.configure(bg="#4A4A4C")
                 self.frame.configure(bg="#4A4A4C")
@@ -330,22 +377,28 @@ class Indicator:
 
 # ── Main ─────────────────────────────────────────────────────────────────────────
 def main():
-    print("Audio LLM Transcriber")
-    print("Hold Right ⌘ (Command) to record. Release to transcribe & paste.")
-    print("Press Right Shift once to latch recording on. Press it again to stop.")
-    print("Close the indicator window or Ctrl+C to quit.")
-    print(f"\n🎤 Audio devices:")
-    print(f"   System default input: {sd.query_devices(kind='input')['name']}")
+    log("Audio LLM Transcriber")
+    log(f"Loaded user env path: {USER_ENV_PATH}")
+    log(f"Log path: {LOG_PATH}")
+    if IS_WINDOWS:
+        log("Press Ctrl+R to start recording. Press again to stop & transcribe.")
+    elif IS_MACOS:
+        log("Press Right Command to start recording. Press again to stop & transcribe.")
+    else:
+        log("Press Ctrl+R (or Cmd+R on macOS) to start recording. Press again to stop & transcribe.")
+    log("Close the indicator window or Ctrl+C to quit.")
+    log("Audio devices:")
+    log(f"   System default input: {sd.query_devices(kind='input')['name']}")
     
     # Show which device will actually be used
     builtin_idx = get_builtin_mic_device()
     if builtin_idx is not None:
         builtin_name = sd.query_devices(builtin_idx)['name']
-        print(f"   Using for recording: {builtin_name} ✓")
+        log(f"   Using for recording: {builtin_name}")
     else:
-        print(f"   Using for recording: (system default)")
+        log("   Using for recording: (system default)")
     
-    print(f"   Sample rate: {SAMPLE_RATE}Hz, Channels: {CHANNELS}\n")
+    log(f"   Sample rate: {SAMPLE_RATE}Hz, Channels: {CHANNELS}")
 
     # Start the key listener in a background thread
     listener = keyboard.Listener(on_press=on_press, on_release=on_release)
@@ -360,4 +413,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        logging.exception("Audio Transcriber crashed")
+        raise
