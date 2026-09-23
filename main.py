@@ -99,28 +99,24 @@ def log(message):
     print(message)
     logging.info(message)
 
-def get_builtin_mic_device():
-    """Find and return the built-in microphone device index (cross-platform)."""
+def get_mic_device():
+    """Find the preferred microphone, trying headphones/headsets before built-in mics."""
     devices = sd.query_devices()
-    
-    # Platform-specific keywords for built-in mics
+
     if IS_WINDOWS:
-        keywords = ['realtek', 'conexant', 'id', 'high definition audio', 'microphone']
+        keywords = ['airpods', 'headset', 'realtek', 'conexant', 'id', 'high definition audio', 'microphone']
     elif IS_MACOS:
-        keywords = ['macbook', 'built-in', 'internal']
+        keywords = ['airpods', 'headset', 'macbook', 'built-in', 'internal']
     else:  # Linux and others
-        keywords = ['built-in', 'internal', 'alsa', 'pulse']
-    
-    # Search for built-in mic
-    for idx, device in enumerate(devices):
-        device_name = device['name'].lower()
-        if any(keyword in device_name for keyword in keywords):
-            if device['max_input_channels'] > 0:  # Ensure it's an input device
-                log(f"Found built-in mic: {device['name']} (device {idx})")
+        keywords = ['bluez', 'airpods', 'headset', 'built-in', 'internal', 'pulse']
+
+    for keyword in keywords:
+        for idx, device in enumerate(devices):
+            if keyword in device['name'].lower() and device['max_input_channels'] > 0:
+                log(f"Using mic: {device['name']} (device {idx})")
                 return idx
-    
-    # Fallback to default if built-in not found
-    log("Built-in mic not found, using default input device")
+
+    log("No preferred mic found, using default input device")
     return None
 
 def start_recording(mode="hold"):
@@ -132,11 +128,10 @@ def start_recording(mode="hold"):
     is_recording = True
     recording_mode = mode
     
-    # Get the built-in microphone device
-    builtin_mic = get_builtin_mic_device()
-    
+    mic = get_mic_device()
+
     stream = sd.InputStream(
-        device=builtin_mic,  # Explicitly use built-in mic
+        device=mic,
         samplerate=SAMPLE_RATE,
         channels=CHANNELS,
         dtype=DTYPE,
@@ -426,10 +421,9 @@ def main():
     log(f"   System default input: {sd.query_devices(kind='input')['name']}")
     
     # Show which device will actually be used
-    builtin_idx = get_builtin_mic_device()
-    if builtin_idx is not None:
-        builtin_name = sd.query_devices(builtin_idx)['name']
-        log(f"   Using for recording: {builtin_name}")
+    mic_idx = get_mic_device()
+    if mic_idx is not None:
+        log(f"   Using for recording: {sd.query_devices(mic_idx)['name']}")
     else:
         log("   Using for recording: (system default)")
     
