@@ -1,0 +1,187 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Audio Transcriber</title>
+<style>
+  :root { --bg: #f7f7f5; --card: #fff; --text: #1d1d1f; --muted: #6e6e73; --line: #e5e5e5; --accent: #1d1d1f; --red: #d93025; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1c1c1e; --card: #2c2c2e; --text: #f2f2f7; --muted: #98989d; --line: #3a3a3c; --accent: #f2f2f7; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, sans-serif; background: var(--bg); color: var(--text); display: flex; height: 100vh; }
+  nav { width: 160px; padding: 20px 10px; border-right: 1px solid var(--line); }
+  nav button { display: block; width: 100%; text-align: left; padding: 8px 12px; margin-bottom: 4px; border: 0; border-radius: 8px; background: none; color: var(--text); font: inherit; cursor: pointer; }
+  nav button.on { background: var(--card); font-weight: 600; }
+  main { flex: 1; padding: 24px; overflow-y: auto; }
+  h1 { font-size: 20px; margin: 0 0 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 10px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .grow { flex: 1; min-width: 0; }
+  .muted { color: var(--muted); font-size: 12px; }
+  input, textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; }
+  textarea { min-height: 90px; resize: vertical; margin-bottom: 8px; }
+  button.act { padding: 7px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--text); font: inherit; cursor: pointer; white-space: nowrap; }
+  button.main { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  button.stop { background: var(--red); color: #fff; border-color: var(--red); }
+  .badge { font-size: 12px; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
+  .badge.live { color: var(--red); border-color: var(--red); }
+  pre { white-space: pre-wrap; font: inherit; margin: 10px 0 0; padding-top: 10px; border-top: 1px solid var(--line); }
+  .text { white-space: pre-wrap; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<nav>
+  <button data-tab="meetings" class="on">Meetings</button>
+  <button data-tab="history">History</button>
+  <button data-tab="notes">Notes</button>
+</nav>
+<main>
+  <section id="meetings">
+    <h1>Meetings</h1>
+    <div class="card row" id="recorder"></div>
+    <div id="meeting-list"></div>
+  </section>
+  <section id="history" class="hidden">
+    <h1>History</h1>
+    <div id="dictation-list"></div>
+  </section>
+  <section id="notes" class="hidden">
+    <h1>Notes</h1>
+    <div class="card">
+      <textarea id="note" placeholder="Type, or click here and press Right Ctrl to dictate"></textarea>
+      <button class="act main" id="save-note">Save note</button>
+    </div>
+    <div id="note-list"></div>
+  </section>
+</main>
+<script>
+  let state = null;
+  let last = '';
+  const open = new Set();
+
+  function el(tag, props = {}, ...children) {
+    const node = Object.assign(document.createElement(tag), props);
+    node.append(...children);
+    return node;
+  }
+  const button = (text, cls, onclick) => el('button', { className: 'act ' + cls, textContent: text, onclick });
+  const copyButton = (text, value) => button(text, '', async (e) => {
+    await pywebview.api.copy(value);
+    e.target.textContent = 'Copied!';
+    setTimeout(() => e.target.textContent = text, 1500);
+  });
+  const when = (iso) => new Date(iso).toLocaleString();
+
+  function clock(seconds) {
+    const s = Math.max(0, Math.floor(seconds));
+    return [s / 3600, (s % 3600) / 60, s % 60].map((n) => String(Math.floor(n)).padStart(2, '0')).join(':');
+  }
+
+  function status(m) {
+    if (state.recording?.sessionId === m.id) return ['Recording', 'live'];
+    if (m.error) return ['Failed', ''];
+    if (m.state === 'transcribed') return ['Done', ''];
+    if (!m.transcribe) return ['Audio only', ''];
+    return ['Transcribing…', 'live'];
+  }
+
+  function renderRecorder() {
+    const box = document.getElementById('recorder');
+    const rec = state.recording;
+    if (rec) {
+      box.replaceChildren(
+        el('span', { className: 'badge live', textContent: '● Recording' }),
+        el('span', { className: 'grow', id: 'timer' }),
+        button('Stop', 'stop', async () => { await pywebview.api.stop_meeting(); refresh(); }),
+      );
+      tick();
+    } else if (!box.querySelector('input')) {
+      const title = el('input', { className: 'grow', placeholder: 'Meeting title (optional)' });
+      box.replaceChildren(title, button('Start meeting', 'main', async (e) => {
+        e.target.disabled = true;
+        await pywebview.api.start_meeting(title.value);
+        e.target.disabled = false;
+        refresh();
+      }));
+    }
+  }
+
+  function toggleTranscript(id) {
+    if (open.has(id)) open.delete(id); else open.add(id);
+    render(true);
+  }
+
+  async function renderMeetings() {
+    const cards = await Promise.all(state.meetings.map(async (m) => {
+      const [label, cls] = status(m);
+      const card = el('div', { className: 'card' }, el('div', { className: 'row' },
+        el('div', { className: 'grow' }, el('div', { textContent: m.title || m.id }), el('div', { className: 'muted', textContent: when(m.started_at) })),
+        el('span', { className: 'badge ' + cls, textContent: label, title: m.error || '' }),
+        m.state === 'transcribed' ? button(open.has(m.id) ? 'Hide' : 'Transcript', '', () => toggleTranscript(m.id)) : '',
+        label === 'Recording' ? '' : button('Delete', '', async () => {
+          if (!confirm(`Delete "${m.title || m.id}" and its audio?`)) return;
+          await pywebview.api.delete_meeting(m.id);
+          refresh();
+        }),
+      ));
+      if (m.error) card.append(el('div', { className: 'muted', textContent: m.error }));
+      if (open.has(m.id)) {
+        const text = await pywebview.api.transcript(m.id);
+        card.append(el('pre', { textContent: text }), copyButton('Copy transcript', text));
+      }
+      return card;
+    }));
+    document.getElementById('meeting-list').replaceChildren(...cards);
+  }
+
+  function renderList(id, items, onDelete) {
+    document.getElementById(id).replaceChildren(...items.map((d) => el('div', { className: 'card row' },
+      el('div', { className: 'grow' }, el('div', { className: 'text', textContent: d.text }), el('div', { className: 'muted', textContent: when(d.created_at) })),
+      copyButton('Copy', d.text),
+      button('Delete', '', async () => { await onDelete(d.id); refresh(); }),
+    )));
+  }
+
+  function render(force) {
+    const snapshot = JSON.stringify(state);
+    if (!force && snapshot === last) return;
+    last = snapshot;
+    renderRecorder();
+    renderMeetings();
+    renderList('dictation-list', state.dictations, (id) => pywebview.api.delete_dictation(id));
+    renderList('note-list', state.notes, (id) => pywebview.api.delete_note(id));
+  }
+
+  async function refresh() {
+    state = await pywebview.api.state();
+    render(false);
+  }
+
+  function tick() {
+    const timer = document.getElementById('timer');
+    if (timer && state.recording) timer.textContent = clock((Date.now() - new Date(state.recording.startedAt)) / 1000);
+  }
+
+  document.querySelectorAll('nav button').forEach((b) => b.onclick = () => {
+    document.querySelectorAll('nav button').forEach((x) => x.classList.toggle('on', x === b));
+    document.querySelectorAll('main section').forEach((s) => s.classList.toggle('hidden', s.id !== b.dataset.tab));
+  });
+
+  document.getElementById('save-note').onclick = async () => {
+    const note = document.getElementById('note');
+    if (!note.value.trim()) return;
+    await pywebview.api.add_note(note.value.trim());
+    note.value = '';
+    refresh();
+  };
+
+  window.addEventListener('pywebviewready', () => {
+    refresh();
+    setInterval(refresh, 2000);
+    setInterval(tick, 1000);
+  });
+</script>
+</body>
+</html>

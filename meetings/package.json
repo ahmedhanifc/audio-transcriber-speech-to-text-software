@@ -1,0 +1,25 @@
+{
+  "name": "local-meeting-minutes",
+  "version": "1.0.0",
+  "description": "Local-first meeting minutes, transcribed on your own CPU",
+  "main": "script.js",
+  "bin": {
+    "minutes": "script.js"
+  },
+  "scripts": {
+    "start": "node script.js",
+    "test": "node --test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ahmedhanifc/local-meeting-minutes.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/ahmedhanifc/local-meeting-minutes/issues"
+  },
+  "homepage": "https://github.com/ahmedhanifc/local-meeting-minutes#readme"
+}

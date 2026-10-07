@@ -4,4 +4,5 @@ numpy
 openai
 pyperclip
 python-dotenv
+pywebview[qt]
 pyinstaller

@@ -8,6 +8,8 @@ import queue
 import wave
 import tempfile
 import os
+import re
+import subprocess
 import sys
 import tkinter as tk
 from pathlib import Path
@@ -43,6 +45,7 @@ from pynput import keyboard
 from pynput.keyboard import Key, Controller as KeyboardController
 from openai import OpenAI
 from dotenv import load_dotenv
+from panel import ROOT, meeting_status, meetings_cli, save_dictation
 
 # ── Config ──────────────────────────────────────────────────────────────────────
 load_dotenv()
@@ -211,6 +214,7 @@ def _process_audio():
         kb.press("v")
         kb.release("v")
         kb.release(paste_modifier)
+        save_dictation(final_text)
 
         ui_queue.put("idle")
     except Exception:
@@ -240,6 +244,23 @@ def on_release(key):
 
 
 # ── Tkinter UI (floating indicator) ─────────────────────────────────────────────
+def get_monitors():
+    """Return (x, y, w, h) for each active monitor. X11 only; empty elsewhere."""
+    if not IS_LINUX:
+        return []
+    try:
+        out = subprocess.run(
+            ["xrandr", "--listactivemonitors"], capture_output=True, text=True, timeout=2
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    # Lines look like: " 1: +HDMI-1 1920/480x1080/270+1920+0  HDMI-1"
+    return [
+        (int(x), int(y), int(w), int(h))
+        for w, h, x, y in re.findall(r"(\d+)/\d+x(\d+)/\d+\+(\d+)\+(\d+)", out)
+    ]
+
+
 class Indicator:
     """Minimal pill-shaped indicator at bottom-center with hover expansion."""
 
@@ -277,59 +298,92 @@ class Indicator:
         )
         self.label.pack()
 
+        # Shown on hover instead of the label.
+        self.buttons = tk.Frame(self.frame, bg="#4A4A4C")
+        self.meeting_btn = tk.Label(self.buttons, font=self.ui_font_small, fg="white", bg="#4A4A4C", padx=8, pady=3, cursor="hand2")
+        self.meeting_btn.pack(side="left")
+        self.meeting_btn.bind("<Button-1>", lambda e: meetings_cli("stop" if self.meeting else "start"))
+        panel_btn = tk.Label(self.buttons, text="☰ Panel", font=self.ui_font_small, fg="white", bg="#4A4A4C", padx=8, pady=3, cursor="hand2")
+        panel_btn.pack(side="left")
+        panel_btn.bind("<Button-1>", lambda e: self._open_panel())
+
         # State tracking
         self.current_state = "idle"
         self.is_hovered = False
+        self.meeting = meeting_status()
+        self.panel = None
         
         # Position at bottom center - start as small pill
         self.screen_w = self.root.winfo_screenwidth()
         self.screen_h = self.root.winfo_screenheight()
-        
-        # Bind hover events
+        # With several monitors the screen spans all of them, so centre on one.
+        self.monitors = get_monitors()
+
+        # Bind hover events (child widgets fire these too)
         self.root.bind("<Enter>", self._on_hover_enter)
         self.root.bind("<Leave>", self._on_hover_leave)
-        self.label.bind("<Enter>", self._on_hover_enter)
-        self.label.bind("<Leave>", self._on_hover_leave)
-        
-        self._set_idle_geometry()
+
+        self._update_display()
         self._poll_queue()
+        self._poll_meeting()
 
     def _on_hover_enter(self, event=None):
         """Handle mouse entering the indicator."""
-        self.is_hovered = True
-        self._update_display()
+        if not self.is_hovered:
+            self.is_hovered = True
+            self._update_display()
 
     def _on_hover_leave(self, event=None):
         """Handle mouse leaving the indicator."""
-        self.is_hovered = False
-        self._update_display()
+        # Moving between child widgets also fires Leave, so check where the mouse really is.
+        self.root.after(50, self._check_hover)
+
+    def _check_hover(self):
+        if self.is_hovered and self.root.winfo_containing(*self.root.winfo_pointerxy()) is None:
+            self.is_hovered = False
+            self._update_display()
+
+    def _open_panel(self):
+        if self.panel is None or self.panel.poll() is not None:
+            self.panel = subprocess.Popen([sys.executable, str(ROOT / "panel.py")])
 
     def _set_idle_geometry(self):
         """Set geometry for idle state - small pill shape."""
-        if self.is_hovered:
-            # Expanded on hover
-            line_width = 120
-            line_height = 20
-        else:
-            # Minimal pill
-            line_width = 60
-            line_height = 3
-        
-        x = (self.screen_w - line_width) // 2
-        y = self.screen_h - 60
+        line_width = 60
+        line_height = 3
+        mx, my, mw, mh = self._monitor_bounds()
+        x = mx + (mw - line_width) // 2
+        y = my + mh - 60
         self.root.geometry(f"{line_width}x{line_height}+{x}+{y}")
+
+    def _monitor_bounds(self):
+        """Bounds of the monitor under the mouse, or the whole screen if unknown."""
+        px, py = self.root.winfo_pointerxy()
+        for x, y, w, h in self.monitors:
+            if x <= px < x + w and y <= py < y + h:
+                return x, y, w, h
+        return 0, 0, self.screen_w, self.screen_h
 
     def _set_active_geometry(self):
         """Set geometry for active state - expanded with text."""
         self.root.update_idletasks()
-        win_w = max(self.label.winfo_reqwidth(), 140)
-        win_h = max(self.label.winfo_reqheight(), 24)
-        x = (self.screen_w - win_w) // 2
-        y = self.screen_h - 60
+        win_w = max(self.frame.winfo_reqwidth(), 140)
+        win_h = max(self.frame.winfo_reqheight(), 24)
+        mx, my, mw, mh = self._monitor_bounds()
+        x = mx + (mw - win_w) // 2
+        y = my + mh - 60
         self.root.geometry(f"{win_w}x{win_h}+{x}+{y}")
 
     def _update_display(self):
         """Update the display based on current state and hover."""
+        show_buttons = self.current_state == "idle" and self.is_hovered
+        if show_buttons:
+            self.label.pack_forget()
+            self.buttons.pack()
+        else:
+            self.buttons.pack_forget()
+            self.label.pack()
+
         if self.current_state == "recording":
             self.label.config(
                 text="  🔴 Recording...  ",
@@ -366,30 +420,23 @@ class Indicator:
             self.root.configure(bg="#2C2C2E")
             self.frame.configure(bg="#2C2C2E")
             self._set_active_geometry()
+        elif show_buttons:
+            self.meeting_btn.config(text="■ Stop meeting" if self.meeting else "● Meeting")
+            self.root.configure(bg="#4A4A4C")
+            self.frame.configure(bg="#4A4A4C")
+            self._set_active_geometry()
         elif self.current_state == "idle":
-            if self.is_hovered:
-                # Show text on hover
-                self.label.config(
-                    text="  Ready  ",
-                    bg="#4A4A4C",
-                    fg="white",
-                    padx=8,
-                    pady=3,
-                    font=self.ui_font_small
-                )
-                self.root.configure(bg="#4A4A4C")
-                self.frame.configure(bg="#4A4A4C")
-            else:
-                # Minimal pill
-                self.label.config(
-                    text="",
-                    bg="gray20",
-                    fg="white",
-                    padx=0,
-                    pady=0
-                )
-                self.root.configure(bg="gray20")
-                self.frame.configure(bg="gray20")
+            # Minimal pill, red while a meeting records
+            bg = "#DC143C" if self.meeting else "gray20"
+            self.label.config(
+                text="",
+                bg=bg,
+                fg="white",
+                padx=0,
+                pady=0
+            )
+            self.root.configure(bg=bg)
+            self.frame.configure(bg=bg)
             self._set_idle_geometry()
 
     def _poll_queue(self):
@@ -400,6 +447,14 @@ class Indicator:
             self._update_display()
 
         self.root.after(100, self._poll_queue)  # poll every 100ms
+
+    def _poll_meeting(self):
+        """Follow the meeting recorder, whoever started it."""
+        was = self.meeting
+        self.meeting = meeting_status()
+        if bool(was) != bool(self.meeting):
+            self._update_display()
+        self.root.after(1000, self._poll_meeting)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────────

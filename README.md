@@ -5,6 +5,11 @@ Press the recording hotkey to start recording. Press it again to stop, transcrib
 - **Windows / Linux Mint:** Right Ctrl
 - **macOS:** Right Command
 
+Hover over the pill for two buttons:
+
+- **● Meeting** records your mic and speakers, then transcribes on your CPU when you stop (see [`meetings/`](meetings/README.md)). The pill is red while a meeting records.
+- **☰ Panel** opens a window with your meetings, dictation history and notes. You can read, copy and delete them.
+
 ## Setup
 
 ### 1. Install PortAudio (required by sounddevice)

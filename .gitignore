@@ -220,3 +220,15 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 .env
+# Meetings (from local-meeting-minutes)
+meetings/node_modules/
+# Local transcription: onnx-asr + onnxruntime, ~200 MB
+meetings/.venv-asr/
+# Recordings, transcripts and local state — never commit meeting audio
+meetings/data/sessions/
+meetings/data/meetings.db*
+meetings/data/recorder.pid
+meetings/config.json
+# Personal notes, ignored in the old repo too
+meetings/docs/
+meetings/skills/
