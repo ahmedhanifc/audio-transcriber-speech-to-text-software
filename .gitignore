@@ -232,3 +232,5 @@ meetings/config.json
 # Personal notes, ignored in the old repo too
 meetings/docs/
 meetings/skills/
+# Test bench voice recordings
+bench/

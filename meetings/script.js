@@ -531,6 +531,9 @@ function openStore(dbPath = DB_PATH) {
       db.prepare('DELETE FROM chunks WHERE session_id = ?').run(id);
       db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
     },
+    setTitle(id, title) {
+      db.prepare('UPDATE sessions SET title = ? WHERE id = ?').run(title, id);
+    },
     setTranscribe(id, on) {
       db.prepare('UPDATE sessions SET transcribe = ? WHERE id = ?').run(on ? 1 : 0, id);
     },
@@ -673,7 +676,8 @@ async function stepTranscribe(store, session, config, log) {
     ? c.segments.map((s) => ({ start: c.offset_s + s.start, end: c.offset_s + s.end, text: s.text }))
     : [{ start: c.offset_s, end: c.offset_s + c.duration_s, text: c.text }]));
   fs.writeFileSync(path.join(dir, 'transcript.json'), `${JSON.stringify(segments, null, 2)}\n`);
-  fs.writeFileSync(path.join(dir, 'transcript.md'), render(session, segments));
+  // Re-read: the title may have been renamed while this chunk loop ran.
+  fs.writeFileSync(path.join(dir, 'transcript.md'), render(store.sessions.get(session.id), segments));
   store.sessions.setState(session.id, 'transcribed');
   log(`wrote ${path.join(dir, 'transcript.md')}`);
 
@@ -816,6 +820,19 @@ function cmdDelete(store, args) {
   log(`deleted ${id}`);
 }
 
+// The title also heads transcript.md, so re-render it from the saved segments.
+function cmdRename(store, args) {
+  const [id, ...words] = args;
+  if (!id || !store.sessions.get(id)) return log('No such session.');
+  store.sessions.setTitle(id, words.join(' ').trim() || null);
+  const segmentsPath = path.join(sessionDir(id), 'transcript.json');
+  if (fs.existsSync(segmentsPath)) {
+    const segments = JSON.parse(fs.readFileSync(segmentsPath, 'utf8'));
+    fs.writeFileSync(path.join(sessionDir(id), 'transcript.md'), render(store.sessions.get(id), segments));
+  }
+  log(`renamed ${id}`);
+}
+
 const USAGE = `local-meeting-minutes
 
   start [title]     begin recording this machine's mic + system audio
@@ -827,6 +844,7 @@ const USAGE = `local-meeting-minutes
   show [id]         chunk detail for a session (default: most recent)
   retry [id]        resume a failed session from its last good step
   recover           pick up anything left unfinished by a crash
+  rename <id> [title]  rename a session (no title clears it)
   delete <id>       delete a session and its audio
 `;
 
@@ -842,6 +860,7 @@ async function main() {
       case 'list': return cmdList(store);
       case 'status': return cmdStatus();
       case 'show': return cmdShow(store, args);
+      case 'rename': return cmdRename(store, args);
       case 'delete': return cmdDelete(store, args);
       case 'retry': {
         const id = args[0] || store.sessions.all()[0]?.id;

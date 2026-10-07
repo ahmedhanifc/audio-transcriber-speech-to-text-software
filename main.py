@@ -43,9 +43,9 @@ import sounddevice as sd
 import pyperclip
 from pynput import keyboard
 from pynput.keyboard import Key, Controller as KeyboardController
-from openai import OpenAI
 from dotenv import load_dotenv
 from panel import ROOT, meeting_status, meetings_cli, save_dictation
+from voice import find_mic, transcribe
 
 # ── Config ──────────────────────────────────────────────────────────────────────
 load_dotenv()
@@ -81,8 +81,8 @@ if not os.getenv("OPENAI_API_KEY"):
 SAMPLE_RATE = 16000      # 16kHz mono — perfect for Whisper
 CHANNELS = 1
 DTYPE = "int16"
+MIN_VOLUME = 100        # clips quieter than this are silence; the model invents words for them
 
-client = OpenAI()         # picks up OPENAI_API_KEY from .env
 kb = KeyboardController() # for simulating paste
 # Platform-specific modifier key for paste.
 paste_modifier = Key.cmd if IS_MACOS else Key.ctrl
@@ -103,24 +103,12 @@ def log(message):
     logging.info(message)
 
 def get_mic_device():
-    """Find the preferred microphone, trying headphones/headsets before built-in mics."""
-    devices = sd.query_devices()
-
-    if IS_WINDOWS:
-        keywords = ['airpods', 'headset', 'realtek', 'conexant', 'id', 'high definition audio', 'microphone']
-    elif IS_MACOS:
-        keywords = ['airpods', 'headset', 'macbook', 'built-in', 'internal']
-    else:  # Linux and others
-        keywords = ['bluez', 'airpods', 'headset', 'built-in', 'internal', 'pulse']
-
-    for keyword in keywords:
-        for idx, device in enumerate(devices):
-            if keyword in device['name'].lower() and device['max_input_channels'] > 0:
-                log(f"Using mic: {device['name']} (device {idx})")
-                return idx
-
-    log("No preferred mic found, using default input device")
-    return None
+    mic = find_mic()
+    if mic is None:
+        log("No preferred mic found, using default input device")
+    else:
+        log(f"Using mic: {sd.query_devices(mic)['name']} (device {mic})")
+    return mic
 
 def start_recording(mode="hold"):
     global is_recording, audio_frames, stream, recording_mode
@@ -180,8 +168,10 @@ def _process_audio():
         duration = len(audio_data) / SAMPLE_RATE
         rms = np.sqrt(np.mean(audio_data.astype(np.float32) ** 2))
         log(f"Audio: {duration:.1f}s duration, {len(audio_frames)} chunks, RMS volume: {rms:.0f}")
-        if rms < 50:
-            log("Very low volume - mic may not be capturing audio!")
+        if rms < MIN_VOLUME:
+            log("Too quiet - not sending (silent clips come back as made-up words)")
+            ui_queue.put("no_sound")
+            return
 
         tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         with wave.open(tmp.name, "wb") as wf:
@@ -190,19 +180,7 @@ def _process_audio():
             wf.setframerate(SAMPLE_RATE)
             wf.writeframes(audio_data.tobytes())
 
-        # Transcription with cleanup prompt (single API call)
-        with open(tmp.name, "rb") as audio_file:
-            transcript = client.audio.transcriptions.create(
-                model="gpt-4o-transcribe",
-                file=audio_file,
-                language="en",  # English-only for better accuracy
-                # prompt=(
-                #     "Clean transcription. Remove filler words (um, uh, like, you know). "
-                #     "Use proper punctuation and grammar. "
-                #     "If the speaker corrects themselves, keep only the corrected version."
-                # ),
-            )
-        final_text = transcript.text.strip()
+        final_text = transcribe(tmp.name)
         log(f"Transcribed text: {final_text}")
         os.unlink(tmp.name)  # clean up temp file
         # Step 3: Paste at cursor
@@ -420,6 +398,19 @@ class Indicator:
             self.root.configure(bg="#2C2C2E")
             self.frame.configure(bg="#2C2C2E")
             self._set_active_geometry()
+        elif self.current_state == "no_sound":
+            self.label.config(
+                text="  🔇 No sound - check mic  ",
+                bg="#B8860B",
+                fg="white",
+                padx=10,
+                pady=4,
+                font=self.ui_font
+            )
+            self.root.configure(bg="#B8860B")
+            self.frame.configure(bg="#B8860B")
+            self._set_active_geometry()
+            self.root.after(2000, lambda: self.current_state == "no_sound" and ui_queue.put("idle"))
         elif show_buttons:
             self.meeting_btn.config(text="■ Stop meeting" if self.meeting else "● Meeting")
             self.root.configure(bg="#4A4A4C")
@@ -472,6 +463,7 @@ def main():
     else:
         log("Press Right Ctrl to start recording. Press again to stop & transcribe.")
     log("Close the indicator window or Ctrl+C to quit.")
+    log(f"Speech model: {os.getenv('STT_MODEL') or 'gpt-4o-transcribe'}")
     log("Audio devices:")
     log(f"   System default input: {sd.query_devices(kind='input')['name']}")
     

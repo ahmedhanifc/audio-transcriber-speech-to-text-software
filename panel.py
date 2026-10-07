@@ -60,6 +60,9 @@ class Api:
     def stop_meeting(self):
         meetings_cli("stop")
 
+    def rename_meeting(self, id, title):
+        meetings_cli("rename", id, *title.split()).wait()
+
     def delete_meeting(self, id):
         meetings_cli("delete", id).wait()
 

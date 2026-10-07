@@ -60,6 +60,7 @@
   let state = null;
   let last = '';
   const open = new Set();
+  let editing = null; // meeting id being renamed: re-rendering would steal the input
 
   function el(tag, props = {}, ...children) {
     const node = Object.assign(document.createElement(tag), props);
@@ -113,12 +114,30 @@
     render(true);
   }
 
+  function rename(m, titleBox) {
+    editing = m.id;
+    const input = el('input', { value: m.title || '', placeholder: m.id });
+    const done = async (save) => {
+      if (editing !== m.id) return; // Enter's save also fires blur
+      editing = null;
+      const title = input.value.trim();
+      if (save && title !== (m.title || '')) await pywebview.api.rename_meeting(m.id, title);
+      refresh(true);
+    };
+    input.onkeydown = (e) => { if (e.key === 'Enter') done(true); else if (e.key === 'Escape') done(false); };
+    input.onblur = () => done(true);
+    titleBox.replaceWith(input);
+    input.select();
+  }
+
   async function renderMeetings() {
     const cards = await Promise.all(state.meetings.map(async (m) => {
       const [label, cls] = status(m);
+      const title = el('div', { textContent: m.title || m.id, title: 'Double-click to rename', ondblclick: () => rename(m, title) });
       const card = el('div', { className: 'card' }, el('div', { className: 'row' },
-        el('div', { className: 'grow' }, el('div', { textContent: m.title || m.id }), el('div', { className: 'muted', textContent: when(m.started_at) })),
+        el('div', { className: 'grow' }, title, el('div', { className: 'muted', textContent: when(m.started_at) })),
         el('span', { className: 'badge ' + cls, textContent: label, title: m.error || '' }),
+        button('Rename', '', () => rename(m, title)),
         m.state === 'transcribed' ? button(open.has(m.id) ? 'Hide' : 'Transcript', '', () => toggleTranscript(m.id)) : '',
         label === 'Recording' ? '' : button('Delete', '', async () => {
           if (!confirm(`Delete "${m.title || m.id}" and its audio?`)) return;
@@ -149,14 +168,14 @@
     if (!force && snapshot === last) return;
     last = snapshot;
     renderRecorder();
-    renderMeetings();
+    if (!editing) renderMeetings();
     renderList('dictation-list', state.dictations, (id) => pywebview.api.delete_dictation(id));
     renderList('note-list', state.notes, (id) => pywebview.api.delete_note(id));
   }
 
-  async function refresh() {
+  async function refresh(force = false) {
     state = await pywebview.api.state();
-    render(false);
+    render(force);
   }
 
   function tick() {

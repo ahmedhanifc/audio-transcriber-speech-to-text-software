@@ -6,3 +6,4 @@ pyperclip
 python-dotenv
 pywebview[qt]
 pyinstaller
+google-genai>=2.0
