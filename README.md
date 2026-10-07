@@ -2,7 +2,7 @@
 
 Press **Right Ctrl** (macOS: Right Command), speak, and press it again. Your words are pasted where your cursor is.
 
-Hover over the pill for **● Meeting** (records mic + speakers, see [`meetings/`](meetings/README.md)) and **☰ Panel** (history and notes).
+Hover over the pill for **● Meeting** (records mic + speakers, see [`meetings/`](meetings/README.md)). Keep the mouse on it and the panel (meetings, history, notes) pops up above; move away or click elsewhere to close it.
 
 ## Install
 

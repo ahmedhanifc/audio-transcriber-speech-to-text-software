@@ -2,6 +2,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -85,9 +86,34 @@ class Api:
         with db() as conn:
             conn.execute("DELETE FROM notes WHERE id = ?", (id,))
 
+    def typing(self, busy):
+        # The pill reads this to keep the popup open while a text box has focus.
+        print("busy" if busy else "free", flush=True)
+
+
+POPUP_SIZE = (720, 520)
+
+
+def listen(window):
+    # The pill sends "show X Y" and "hide"; stdin closes when the pill exits.
+    for line in sys.stdin:
+        cmd, *args = line.split()
+        if cmd == "show":
+            window.move(int(args[0]), int(args[1]))
+            window.show()
+            window.evaluate_js("refresh(true)")
+        elif cmd == "hide":
+            window.hide()
+    window.destroy()
+
 
 if __name__ == "__main__":
     import webview
 
-    webview.create_window("Audio Transcriber", str(ROOT / "panel.html"), js_api=Api(), width=760, height=640)
-    webview.start(gui="qt")
+    if "--popup" in sys.argv:
+        w, h = POPUP_SIZE
+        window = webview.create_window("Audio Transcriber", str(ROOT / "panel.html"), js_api=Api(), width=w, height=h, frameless=True, on_top=True, hidden=True)
+        webview.start(listen, window, gui="qt")
+    else:
+        webview.create_window("Audio Transcriber", str(ROOT / "panel.html"), js_api=Api(), width=760, height=640)
+        webview.start(gui="qt")

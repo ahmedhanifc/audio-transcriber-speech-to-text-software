@@ -196,6 +196,9 @@
     refresh();
   };
 
+  document.addEventListener('focusin', (e) => e.target.matches('input, textarea') && pywebview.api.typing(true));
+  document.addEventListener('focusout', (e) => e.target.matches('input, textarea') && pywebview.api.typing(false));
+
   window.addEventListener('pywebviewready', () => {
     refresh();
     setInterval(refresh, 2000);

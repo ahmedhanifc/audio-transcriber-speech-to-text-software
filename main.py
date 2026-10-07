@@ -41,10 +41,10 @@ validate_linux_session()
 import numpy as np
 import sounddevice as sd
 import pyperclip
-from pynput import keyboard
+from pynput import keyboard, mouse
 from pynput.keyboard import Key, Controller as KeyboardController
 from dotenv import load_dotenv
-from panel import ROOT, meeting_status, meetings_cli, save_dictation
+from panel import POPUP_SIZE, ROOT, meeting_status, meetings_cli, save_dictation
 from voice import find_mic, transcribe
 
 # ── Config ──────────────────────────────────────────────────────────────────────
@@ -281,15 +281,16 @@ class Indicator:
         self.meeting_btn = tk.Label(self.buttons, font=self.ui_font_small, fg="white", bg="#4A4A4C", padx=8, pady=3, cursor="hand2")
         self.meeting_btn.pack(side="left")
         self.meeting_btn.bind("<Button-1>", lambda e: meetings_cli("stop" if self.meeting else "start"))
-        panel_btn = tk.Label(self.buttons, text="☰ Panel", font=self.ui_font_small, fg="white", bg="#4A4A4C", padx=8, pady=3, cursor="hand2")
-        panel_btn.pack(side="left")
-        panel_btn.bind("<Button-1>", lambda e: self._open_panel())
 
         # State tracking
         self.current_state = "idle"
         self.is_hovered = False
         self.meeting = meeting_status()
         self.panel = None
+        self.panel_open = False
+        self.panel_busy = False
+        self.panel_box = None
+        self.away_ticks = 0
         
         # Position at bottom center - start as small pill
         self.screen_w = self.root.winfo_screenwidth()
@@ -301,6 +302,9 @@ class Indicator:
         self.root.bind("<Enter>", self._on_hover_enter)
         self.root.bind("<Leave>", self._on_hover_leave)
 
+        self._start_panel()
+        mouse.Listener(on_click=self._on_click, daemon=True).start()
+
         self._update_display()
         self._poll_queue()
         self._poll_meeting()
@@ -310,6 +314,7 @@ class Indicator:
         if not self.is_hovered:
             self.is_hovered = True
             self._update_display()
+            self.root.after(300, self._maybe_show_panel)
 
     def _on_hover_leave(self, event=None):
         """Handle mouse leaving the indicator."""
@@ -321,9 +326,62 @@ class Indicator:
             self.is_hovered = False
             self._update_display()
 
-    def _open_panel(self):
-        if self.panel is None or self.panel.poll() is not None:
-            self.panel = subprocess.Popen([sys.executable, str(ROOT / "panel.py")])
+    def _start_panel(self):
+        self.panel = subprocess.Popen(
+            [sys.executable, str(ROOT / "panel.py"), "--popup"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        )
+        threading.Thread(target=self._read_panel, args=(self.panel,), daemon=True).start()
+
+    def _read_panel(self, panel):
+        for line in panel.stdout:
+            self.panel_busy = line.strip() == "busy"
+
+    def _send_panel(self, cmd):
+        if self.panel.poll() is not None:
+            self._start_panel()
+        self.panel.stdin.write(cmd + "\n")
+        self.panel.stdin.flush()
+
+    def _maybe_show_panel(self):
+        if not self.is_hovered or self.panel_open or self.current_state != "idle":
+            return
+        w, h = POPUP_SIZE
+        mx, my, mw, mh = self._monitor_bounds()
+        x = mx + (mw - w) // 2
+        pill_top = my + mh - 60
+        y = pill_top - h - 8
+        # Panel plus pill; clicks outside this close the panel.
+        self.panel_box = (x, y, x + w, pill_top + 30)
+        self.panel_open = True
+        self.away_ticks = 0
+        self._send_panel(f"show {x} {y}")
+        self._watch_panel()
+
+    def _hide_panel(self):
+        if self.panel_open:
+            self.panel_open = False
+            self.panel_busy = False
+            self._send_panel("hide")
+
+    def _in_panel_box(self, x, y, margin=0):
+        x1, y1, x2, y2 = self.panel_box
+        return x1 - margin <= x <= x2 + margin and y1 - margin <= y <= y2 + margin
+
+    def _watch_panel(self):
+        if not self.panel_open:
+            return
+        near = self._in_panel_box(*self.root.winfo_pointerxy(), margin=40)
+        self.away_ticks = 0 if near or self.panel_busy else self.away_ticks + 1
+        if self.away_ticks >= 3:
+            self._hide_panel()
+            return
+        self.root.after(100, self._watch_panel)
+
+    def _on_click(self, x, y, button, pressed):
+        # pynput thread: hand off to tkinter through the queue.
+        if pressed and self.panel_open and not self._in_panel_box(x, y):
+            ui_queue.put("hide_panel")
 
     def _set_idle_geometry(self):
         """Set geometry for idle state - small pill shape."""
@@ -434,6 +492,9 @@ class Indicator:
         """Check the UI queue for state changes."""
         while not ui_queue.empty():
             state = ui_queue.get_nowait()
+            if state == "hide_panel":
+                self._hide_panel()
+                continue
             self.current_state = state
             self._update_display()
 
