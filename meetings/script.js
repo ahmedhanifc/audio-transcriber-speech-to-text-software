@@ -676,8 +676,10 @@ async function stepTranscribe(store, session, config, log) {
     ? c.segments.map((s) => ({ start: c.offset_s + s.start, end: c.offset_s + s.end, text: s.text }))
     : [{ start: c.offset_s, end: c.offset_s + c.duration_s, text: c.text }]));
   fs.writeFileSync(path.join(dir, 'transcript.json'), `${JSON.stringify(segments, null, 2)}\n`);
+  const mdPath = path.join(dir, 'transcript.md');
+  if (fs.existsSync(mdPath)) fs.copyFileSync(mdPath, path.join(dir, 'transcript.bak.md')); // keep panel edits
   // Re-read: the title may have been renamed while this chunk loop ran.
-  fs.writeFileSync(path.join(dir, 'transcript.md'), render(store.sessions.get(session.id), segments));
+  fs.writeFileSync(mdPath, render(store.sessions.get(session.id), segments));
   store.sessions.setState(session.id, 'transcribed');
   log(`wrote ${path.join(dir, 'transcript.md')}`);
 
@@ -820,15 +822,16 @@ function cmdDelete(store, args) {
   log(`deleted ${id}`);
 }
 
-// The title also heads transcript.md, so re-render it from the saved segments.
+// The title also heads transcript.md. Swap only that line so edits made in the panel survive.
 function cmdRename(store, args) {
   const [id, ...words] = args;
   if (!id || !store.sessions.get(id)) return log('No such session.');
-  store.sessions.setTitle(id, words.join(' ').trim() || null);
-  const segmentsPath = path.join(sessionDir(id), 'transcript.json');
-  if (fs.existsSync(segmentsPath)) {
-    const segments = JSON.parse(fs.readFileSync(segmentsPath, 'utf8'));
-    fs.writeFileSync(path.join(sessionDir(id), 'transcript.md'), render(store.sessions.get(id), segments));
+  const title = words.join(' ').trim() || null;
+  store.sessions.setTitle(id, title);
+  const mdPath = path.join(sessionDir(id), 'transcript.md');
+  if (fs.existsSync(mdPath)) {
+    const [, ...rest] = fs.readFileSync(mdPath, 'utf8').split('\n');
+    fs.writeFileSync(mdPath, [`# ${title || id}`, ...rest].join('\n'));
   }
   log(`renamed ${id}`);
 }

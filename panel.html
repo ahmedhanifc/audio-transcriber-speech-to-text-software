@@ -26,9 +26,16 @@
   button.stop { background: var(--red); color: #fff; border-color: var(--red); }
   .badge { font-size: 12px; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
   .badge.live { color: var(--red); border-color: var(--red); }
-  pre { white-space: pre-wrap; font: inherit; margin: 10px 0 0; padding-top: 10px; border-top: 1px solid var(--line); }
+  pre { white-space: pre-wrap; font: inherit; margin: 10px 0 8px; padding: 10px 4px 0 0; border-top: 1px solid var(--line); max-height: 45vh; overflow-y: auto; }
   .text { white-space: pre-wrap; }
   .hidden { display: none; }
+  .tabs { margin-bottom: 12px; }
+  .tabs button.on { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  label { display: block; font-weight: 600; }
+  label textarea { min-height: 60px; margin-top: 4px; font-weight: normal; }
+  h3 { font-size: 15px; margin: 0 0 8px; }
+  .entry { margin-top: 8px; }
+  mark { background: #ffe58f; color: #1d1d1f; border-radius: 3px; }
 </style>
 </head>
 <body>
@@ -49,11 +56,27 @@
   </section>
   <section id="notes" class="hidden">
     <h1>Notes</h1>
-    <div class="card">
-      <textarea id="note" placeholder="Type, or click here and press Right Ctrl to dictate"></textarea>
-      <button class="act main" id="save-note">Save note</button>
+    <div class="row tabs">
+      <button class="act on" data-sub="inbox">Inbox</button>
+      <button class="act" data-sub="today">Today</button>
+      <button class="act" data-sub="past">Past</button>
     </div>
-    <div id="note-list"></div>
+    <div id="inbox" class="sub">
+      <div class="card">
+        <textarea id="note" placeholder=""></textarea>
+        <button class="act main" id="save-note">Save note</button>
+      </div>
+      <div id="note-list"></div>
+    </div>
+    <div id="today" class="sub hidden">
+      <div class="card" id="reflection">
+        <div class="row"><button class="act main" id="save-reflection">Save</button><span class="muted" id="reflection-day"></span></div>
+      </div>
+    </div>
+    <div id="past" class="sub hidden">
+      <input id="search" placeholder="Search notes and reflections" style="margin-bottom: 10px">
+      <div id="past-list"></div>
+    </div>
   </section>
 </main>
 <script>
@@ -61,6 +84,9 @@
   let last = '';
   const open = new Set();
   let editing = null; // meeting id being renamed: re-rendering would steal the input
+  let editingNote = null;
+  const LABELS = { did: 'What I did', learned: 'What I learned', blocked: 'What blocked me', better: 'What to do better', people: 'People' };
+  const today = () => new Date().toLocaleDateString('en-CA');
 
   function el(tag, props = {}, ...children) {
     const node = Object.assign(document.createElement(tag), props);
@@ -136,6 +162,7 @@
       const title = el('div', { textContent: m.title || m.id, title: 'Double-click to rename', ondblclick: () => rename(m, title) });
       const card = el('div', { className: 'card' }, el('div', { className: 'row' },
         el('div', { className: 'grow' }, title, el('div', { className: 'muted', textContent: when(m.started_at) })),
+        m.edited ? el('span', { className: 'badge', textContent: 'Edited' }) : '',
         el('span', { className: 'badge ' + cls, textContent: label, title: m.error || '' }),
         button('Rename', '', () => rename(m, title)),
         m.state === 'transcribed' ? button(open.has(m.id) ? 'Hide' : 'Transcript', '', () => toggleTranscript(m.id)) : '',
@@ -148,17 +175,62 @@
       if (m.error) card.append(el('div', { className: 'muted', textContent: m.error }));
       if (open.has(m.id)) {
         const text = await pywebview.api.transcript(m.id);
-        card.append(el('pre', { textContent: text }), copyButton('Copy transcript', text));
+        const note = el('input', { className: 'grow', placeholder: 'Add to minutes' });
+        const add = async () => {
+          if (!note.value.trim()) return;
+          await pywebview.api.append_transcript(m.id, note.value.trim());
+          note.blur();
+          refresh(true);
+        };
+        note.onkeydown = (e) => e.key === 'Enter' && add();
+        card.append(el('pre', { textContent: text }), el('div', { className: 'row' },
+          note,
+          button('Add', '', add),
+          copyButton('Copy transcript', text),
+          button('Edit', '', () => editTranscript(m.id, text, card)),
+        ));
       }
       return card;
     }));
     document.getElementById('meeting-list').replaceChildren(...cards);
   }
 
-  function renderList(id, items, onDelete) {
+  function editTranscript(id, text, card) {
+    editing = id;
+    const box = el('textarea', { value: text, style: 'height: 45vh' });
+    const done = async (save) => {
+      if (save && box.value !== text) await pywebview.api.save_transcript(id, box.value);
+      editing = null;
+      render(true);
+    };
+    card.querySelector('pre').replaceWith(box);
+    box.onkeydown = (e) => {
+      if (e.key === 'Enter' && e.ctrlKey) done(true);
+      else if (e.key === 'Escape') done(false);
+    };
+    card.lastChild.replaceWith(el('div', { className: 'row' }, button('Save', 'main', () => done(true)), button('Cancel', '', () => done(false))));
+    box.focus();
+  }
+
+  function editNote(n, card) {
+    editingNote = n.id;
+    const box = el('textarea', { value: n.text });
+    const done = async (save) => {
+      editingNote = null;
+      const text = box.value.trim();
+      if (save && text && text !== n.text) await pywebview.api.update_note(n.id, text);
+      refresh(true);
+    };
+    card.replaceWith(el('div', { className: 'card' }, box, el('div', { className: 'row' }, button('Save', 'main', () => done(true)), button('Cancel', '', () => done(false)))));
+    box.focus();
+    box.setSelectionRange(box.value.length, box.value.length);
+  }
+
+  function renderList(id, items, onDelete, onEdit) {
     document.getElementById(id).replaceChildren(...items.map((d) => el('div', { className: 'card row' },
       el('div', { className: 'grow' }, el('div', { className: 'text', textContent: d.text }), el('div', { className: 'muted', textContent: when(d.created_at) })),
       copyButton('Copy', d.text),
+      onEdit ? button('Edit', '', (e) => onEdit(d, e.target.closest('.card'))) : '',
       button('Delete', '', async () => { await onDelete(d.id); refresh(); }),
     )));
   }
@@ -168,9 +240,10 @@
     if (!force && snapshot === last) return;
     last = snapshot;
     renderRecorder();
-    if (!editing) renderMeetings();
+    // A focused "Add to minutes" box would lose its text if the list re-rendered.
+    if (!editing && (force || !document.getElementById('meeting-list').contains(document.activeElement))) renderMeetings();
     renderList('dictation-list', state.dictations, (id) => pywebview.api.delete_dictation(id));
-    renderList('note-list', state.notes, (id) => pywebview.api.delete_note(id));
+    if (editingNote === null) renderList('note-list', state.notes, (id) => pywebview.api.delete_note(id), editNote);
   }
 
   async function refresh(force = false) {
@@ -186,6 +259,52 @@
   document.querySelectorAll('nav button').forEach((b) => b.onclick = () => {
     document.querySelectorAll('nav button').forEach((x) => x.classList.toggle('on', x === b));
     document.querySelectorAll('main section').forEach((s) => s.classList.toggle('hidden', s.id !== b.dataset.tab));
+  });
+
+  document.getElementById('reflection').prepend(...Object.entries(LABELS).map(([name, label]) =>
+    el('label', {}, label, el('textarea', { name, placeholder: '' }))));
+
+  async function loadToday() {
+    document.getElementById('reflection-day').textContent = today();
+    const r = await pywebview.api.get_reflection(today());
+    document.querySelectorAll('#reflection textarea').forEach((t) => t.value = r[t.name] || '');
+  }
+
+  document.getElementById('save-reflection').onclick = async (e) => {
+    const fields = {};
+    document.querySelectorAll('#reflection textarea').forEach((t) => fields[t.name] = t.value.trim());
+    await pywebview.api.save_reflection(today(), fields);
+    e.target.textContent = 'Saved!';
+    setTimeout(() => e.target.textContent = 'Save', 1500);
+  };
+
+  // snippet() wraps matches in \x02 … \x03, so odd pieces are the hits.
+  const highlight = (snip) => snip.split(/[\x02\x03]/).map((part, i) => i % 2 ? el('mark', { textContent: part }) : part);
+
+  async function loadPast() {
+    const search = document.getElementById('search');
+    const q = search.value.trim();
+    const cards = q
+      ? (await pywebview.api.search(q)).map((h) => el('div', { className: 'card' },
+          el('div', { className: 'muted', textContent: h.kind === 'note' ? 'Note · ' + when(h.at) : 'Reflection · ' + h.day }),
+          el('div', { className: 'text' }, ...highlight(h.snip))))
+      : (await pywebview.api.days()).map((d) => el('div', { className: 'card' },
+          el('h3', { textContent: d.day }),
+          ...Object.entries(LABELS).filter(([f]) => d.reflection?.[f]).map(([f, label]) =>
+            el('div', { className: 'entry' }, el('div', { className: 'muted', textContent: label }), el('div', { className: 'text', textContent: d.reflection[f] }))),
+          ...d.notes.map((n) => el('div', { className: 'entry' },
+            el('div', { className: 'muted', textContent: 'Note · ' + new Date(n.created_at).toLocaleTimeString() }), el('div', { className: 'text', textContent: n.text }))),
+        ));
+    if (q === search.value.trim()) document.getElementById('past-list').replaceChildren(...cards); // drop stale results
+  }
+
+  document.getElementById('search').oninput = loadPast;
+
+  document.querySelectorAll('.tabs button').forEach((b) => b.onclick = () => {
+    document.querySelectorAll('.tabs button').forEach((x) => x.classList.toggle('on', x === b));
+    document.querySelectorAll('.sub').forEach((s) => s.classList.toggle('hidden', s.id !== b.dataset.sub));
+    if (b.dataset.sub === 'today') loadToday();
+    if (b.dataset.sub === 'past') loadPast();
   });
 
   document.getElementById('save-note').onclick = async () => {

@@ -25,6 +25,7 @@ python main.py
 | `MIC` | Part of the mic name: `bluez` = AirPods, `pulse` = laptop or wired headset | first headset found |
 | `STT_MODEL` | `gpt-4o-transcribe`, `gpt-transcribe`, `gemini-3.5-transcribe` | `gpt-4o-transcribe` |
 | `KEYWORDS` | Words it gets wrong, comma-separated, e.g. `GitHub, PipeWire` | none |
+| `BACKUP_DIR` | Folder for a daily copy of `meetings.db`, e.g. `~/Backups/audio-transcriber` | no backup |
 
 Wired headset on Linux: the laptop mic stays selected until you switch it:
 

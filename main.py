@@ -82,6 +82,7 @@ SAMPLE_RATE = 16000      # 16kHz mono — perfect for Whisper
 CHANNELS = 1
 DTYPE = "int16"
 MIN_VOLUME = 100        # clips quieter than this are silence; the model invents words for them
+HOVER_MARGIN = (40, 20)  # px left/right and above/below the pill that still count as hovering
 
 kb = KeyboardController() # for simulating paste
 # Platform-specific modifier key for paste.
@@ -298,9 +299,6 @@ class Indicator:
         # With several monitors the screen spans all of them, so centre on one.
         self.monitors = get_monitors()
 
-        # Bind hover events (child widgets fire these too)
-        self.root.bind("<Enter>", self._on_hover_enter)
-        self.root.bind("<Leave>", self._on_hover_leave)
 
         self._start_panel()
         mouse.Listener(on_click=self._on_click, daemon=True).start()
@@ -308,23 +306,21 @@ class Indicator:
         self._update_display()
         self._poll_queue()
         self._poll_meeting()
+        self._poll_hover()
 
-    def _on_hover_enter(self, event=None):
-        """Handle mouse entering the indicator."""
-        if not self.is_hovered:
-            self.is_hovered = True
+    def _poll_hover(self):
+        """Hover = pointer within HOVER_MARGIN of the pill, so the 3px line is easy to hit."""
+        px, py = self.root.winfo_pointerxy()
+        x, y = self.root.winfo_rootx(), self.root.winfo_rooty()
+        w, h = self.root.winfo_width(), self.root.winfo_height()
+        mx, my = HOVER_MARGIN
+        near = x - mx <= px <= x + w + mx and y - my <= py <= y + h + my
+        if near != self.is_hovered:
+            self.is_hovered = near
             self._update_display()
-            self.root.after(300, self._maybe_show_panel)
-
-    def _on_hover_leave(self, event=None):
-        """Handle mouse leaving the indicator."""
-        # Moving between child widgets also fires Leave, so check where the mouse really is.
-        self.root.after(50, self._check_hover)
-
-    def _check_hover(self):
-        if self.is_hovered and self.root.winfo_containing(*self.root.winfo_pointerxy()) is None:
-            self.is_hovered = False
-            self._update_display()
+            if near:
+                self.root.after(300, self._maybe_show_panel)
+        self.root.after(50, self._poll_hover)
 
     def _start_panel(self):
         self.panel = subprocess.Popen(
