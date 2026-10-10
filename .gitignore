@@ -235,3 +235,6 @@ meetings/skills/
 # Test bench voice recordings
 bench/
 docs/
+# Ask tab chats (personal)
+chats/*
+!chats/CLAUDE.md

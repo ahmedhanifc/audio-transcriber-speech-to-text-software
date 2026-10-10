@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <title>Audio Transcriber</title>
+<link rel="stylesheet" href="vendor/katex.min.css">
+<script src="vendor/katex.min.js"></script>
+<script src="vendor/marked.js"></script>
 <style>
   :root { --bg: #f7f7f5; --card: #fff; --text: #1d1d1f; --muted: #6e6e73; --line: #e5e5e5; --accent: #1d1d1f; --red: #d93025; --todo: #fff3bf; --doing: #dbeafe; --done: #dcfce7; }
   @media (prefers-color-scheme: dark) {
@@ -47,6 +50,20 @@
   .sticky textarea { flex: 1; min-height: 86px; margin: 0; padding: 0; border: 0; background: none; resize: none; outline: none; }
   .pill { padding: 2px 10px; border: 0; border-radius: 99px; background: rgba(0, 0, 0, .08); color: var(--text); font: inherit; font-size: 12px; cursor: pointer; }
   @media (prefers-color-scheme: dark) { .pill { background: rgba(255, 255, 255, .12); } }
+  #ask:not(.hidden) { display: flex; gap: 12px; height: 100%; }
+  .chat-list { width: 140px; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; }
+  .chat-list .act { margin-bottom: 8px; }
+  .chat-list button.chat { display: block; width: 100%; padding: 6px 8px; border: 0; border-radius: 8px; background: none; color: var(--text); font: inherit; font-size: 12px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+  .chat-list button.chat.on { background: var(--card); font-weight: 600; }
+  .chat { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  #messages { flex: 1; overflow-y: auto; position: relative; }
+  #ask-box { min-height: 64px; margin: 8px 0 0; resize: none; }
+  .md { margin-bottom: 14px; overflow-wrap: break-word; }
+  .md pre { white-space: pre; overflow-x: auto; max-height: none; margin: 8px 0; padding: 10px; border: 0; border-radius: 8px; background: var(--card); }
+  .md code { font: 12px ui-monospace, monospace; }
+  .md table { border-collapse: collapse; }
+  .md th, .md td { border: 1px solid var(--line); padding: 4px 8px; }
+  .md .katex-display { overflow-x: auto; overflow-y: hidden; }
   mark { background: #ffe58f; color: #1d1d1f; border-radius: 3px; }
 </style>
 </head>
@@ -55,6 +72,7 @@
   <button data-tab="meetings" class="on">Meetings</button>
   <button data-tab="history">History</button>
   <button data-tab="notes">Notes</button>
+  <button data-tab="ask">Ask</button>
 </nav>
 <main>
   <section id="meetings">
@@ -90,6 +108,16 @@
     <div id="past" class="sub hidden">
       <input id="search" placeholder="Search notes and reflections" style="margin-bottom: 10px">
       <div id="past-list"></div>
+    </div>
+  </section>
+  <section id="ask" class="hidden">
+    <div class="chat-list">
+      <button class="act main" id="new-chat">New chat</button>
+      <div id="chat-list"></div>
+    </div>
+    <div class="chat">
+      <div id="messages"></div>
+      <textarea id="ask-box" placeholder="Ask anything. Paste file or screenshot paths. Enter sends, Shift+Enter is a new line."></textarea>
     </div>
   </section>
 </main>
@@ -300,7 +328,86 @@
   document.querySelectorAll('nav button').forEach((b) => b.onclick = () => {
     document.querySelectorAll('nav button').forEach((x) => x.classList.toggle('on', x === b));
     document.querySelectorAll('main section').forEach((s) => s.classList.toggle('hidden', s.id !== b.dataset.tab));
+    if (b.dataset.tab === 'ask') loadChats();
   });
+
+  let chat = null; // file name of the open chat, null for a new one
+  let live = null; // the answer being streamed in
+  let liveText = '';
+  const messages = document.getElementById('messages');
+  const askBox = document.getElementById('ask-box');
+
+  // Show raw HTML from answers as text, so it can't run scripts in the panel.
+  marked.use({ renderer: { html: ({ text }) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;') } });
+
+  // Math is pulled out first, or marked would eat its backslashes and underscores.
+  function md(text) {
+    const math = [];
+    const stash = (tex, display) => `@@MATH${math.push({ tex, display }) - 1}@@`;
+    text = text.replace(/\$\$([\s\S]+?)\$\$/g, (_, t) => stash(t, true)).replace(/\$([^$\n]+?)\$/g, (_, t) => stash(t, false));
+    return marked.parse(text).replace(/@@MATH(\d+)@@/g, (_, i) => katex.renderToString(math[i].tex, { displayMode: math[i].display, throwOnError: false }));
+  }
+
+  // Again once KaTeX fonts load, since they make the answer taller.
+  const toBottom = () => {
+    messages.scrollTop = messages.scrollHeight;
+    document.fonts.ready.then(() => messages.scrollTop = messages.scrollHeight);
+  };
+
+  const message = (role, text) => role === 'You'
+    ? el('div', { className: 'card text', textContent: text })
+    : el('div', { className: 'md', innerHTML: md(text) });
+
+  async function loadChats() {
+    const names = await pywebview.api.chats();
+    document.getElementById('chat-list').replaceChildren(...names.map((n) => el('button', {
+      className: 'chat' + (n === chat ? ' on' : ''), title: n, textContent: n.slice(16, -3).replace(/-/g, ' '), onclick: () => openChat(n),
+    })));
+  }
+
+  async function openChat(name) {
+    chat = name;
+    messages.replaceChildren(...(name ? await pywebview.api.open_chat(name) : []).map((t) => message(t.role, t.text)));
+    toBottom();
+    loadChats();
+  }
+
+  function onPiece(piece) {
+    liveText += piece;
+    live.className = 'md';
+    live.innerHTML = md(liveText);
+    toBottom();
+  }
+
+  askBox.onkeydown = async (e) => {
+    if (e.key !== 'Enter' || e.shiftKey) return;
+    e.preventDefault();
+    const text = askBox.value.trim();
+    if (!text || live) return;
+    askBox.value = '';
+    const from = chat;
+    live = el('div', { className: 'md muted', textContent: 'Thinking…' });
+    liveText = '';
+    messages.append(message('You', text), live);
+    toBottom();
+    try {
+      const name = await pywebview.api.send(from, text);
+      live = null;
+      if (chat === from) openChat(name); else loadChats();
+    } catch (err) {
+      live.textContent = 'Error: ' + err;
+      live = null;
+    }
+  };
+
+  document.getElementById('new-chat').onclick = () => { openChat(null); askBox.focus(); };
+
+  messages.onclick = (e) => {
+    const a = e.target.closest('a');
+    if (!a) return;
+    e.preventDefault();
+    pywebview.api.open_url(a.href);
+  };
 
   document.getElementById('reflection').prepend(...Object.entries(LABELS).map(([name, label]) =>
     el('label', {}, label, el('textarea', { name, placeholder: '' }))));

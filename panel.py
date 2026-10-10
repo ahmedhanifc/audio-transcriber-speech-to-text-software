@@ -1,13 +1,17 @@
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
+import webbrowser
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pyperclip
 from dotenv import load_dotenv
+
+import agent
 
 ROOT = Path(__file__).resolve().parent
 MEETINGS = ROOT / "meetings"
@@ -208,6 +212,31 @@ class Api:
             for n in conn.execute(f"SELECT * FROM notes WHERE {ARCHIVED} ORDER BY done_at", (archive_cutoff(),)):
                 notes.setdefault(n["done_at"][:10], []).append(dict(n))
         return [{"day": d, "reflection": reflections.get(d), "notes": notes.get(d, [])} for d in sorted(reflections.keys() | notes.keys(), reverse=True)]
+
+    def chats(self):
+        files = sorted(agent.CHATS.glob("2*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
+        return [f.name for f in files]
+
+    def open_chat(self, name):
+        text = (agent.CHATS / name).read_text().split("\n", 1)[1]
+        turns = re.split(r"^## (You|Claude)\n", text, flags=re.M)[1:]
+        return [{"role": role, "text": body.strip()} for role, body in zip(turns[::2], turns[1::2])]
+
+    def send(self, name, text):
+        # pywebview runs each call in its own thread, so streaming here doesn't freeze the panel.
+        import webview
+
+        path = agent.CHATS / (name or f"{datetime.now():%Y-%m-%d-%H%M}-{re.sub(r'[^a-z0-9]+', '-', text.lower()[:40]).strip('-')}.md")
+        session = path.read_text().split("\n", 1)[0].removeprefix("session: ") if path.exists() else None
+        on_piece = lambda piece: webview.windows[0].evaluate_js(f"onPiece({json.dumps(piece)})")
+        answer, session = agent.ask(text, session, on_piece)
+        body = path.read_text().split("\n", 1)[1] if path.exists() else "\n"
+        path.write_text(f"session: {session}\n{body}## You\n\n{text}\n\n## Claude\n\n{answer}\n\n")
+        return path.name
+
+    def open_url(self, url):
+        if url.startswith(("http://", "https://")):
+            webbrowser.open(url)
 
     def typing(self, busy):
         # The pill reads this to keep the popup open while a text box has focus.
