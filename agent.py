@@ -6,10 +6,30 @@ from pathlib import Path
 
 CHATS = Path(__file__).resolve().parent / "chats"
 TOOLS = ["Read", "Glob", "Grep"]
+CLAUDE_MODELS = ["opus", "sonnet", "haiku"]
+CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"]
 
 
-def ask(text, session, on_piece):
-    return (codex if os.getenv("ASK_AGENT") == "codex" else claude)(text, session, on_piece)
+def choices():
+    """Agent -> model -> efforts for the Ask tab. "" means the CLI's own setting."""
+    found = {"claude": {m: CLAUDE_EFFORTS for m in ["", *CLAUDE_MODELS]}, "codex": {"": []}}
+    cache = Path.home() / ".codex" / "models_cache.json"
+    if cache.exists():
+        for m in json.loads(cache.read_text())["models"]:
+            if m["visibility"] == "list":
+                found["codex"][m["slug"]] = [r["effort"] for r in m["supported_reasoning_levels"]]
+                found["codex"][""] += [r["effort"] for r in m["supported_reasoning_levels"] if r["effort"] not in found["codex"][""]]
+    # .env picks the starting choice, even a model that isn't listed.
+    default = {"agent": os.getenv("ASK_AGENT") or "claude"}
+    for who, models in found.items():
+        model = os.getenv(f"{who.upper()}_MODEL", "")
+        models.setdefault(model, models[""])
+        default[who] = [model, os.getenv(f"{who.upper()}_EFFORT", "")]
+    return {**found, "default": default}
+
+
+def ask(text, session, on_piece, who, model, effort):
+    return (codex if who == "codex" else claude)(text, session, on_piece, model, effort)
 
 
 def run(cmd, text):
@@ -21,15 +41,15 @@ def run(cmd, text):
     proc.wait()
 
 
-def claude(text, session, on_piece):
+def claude(text, session, on_piece, model, effort):
     cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
            "--tools", *TOOLS, "--allowedTools", *TOOLS, "--add-dir", str(Path.home())]
     if session:
         cmd += ["--resume", session]
-    if os.getenv("CLAUDE_MODEL"):
-        cmd += ["--model", os.getenv("CLAUDE_MODEL")]
-    if os.getenv("CLAUDE_EFFORT"):
-        cmd += ["--effort", os.getenv("CLAUDE_EFFORT")]
+    if model:
+        cmd += ["--model", model]
+    if effort:
+        cmd += ["--effort", effort]
     for e in run(cmd, text):
         delta = e.get("event", {}).get("delta", {})
         if delta.get("type") == "text_delta":
@@ -39,13 +59,13 @@ def claude(text, session, on_piece):
     return "Claude stopped without an answer.", session
 
 
-def codex(text, session, on_piece):
+def codex(text, session, on_piece, model, effort):
     # Codex sends whole messages, not word by word. It can't open images itself, so they go in with -i.
     cmd = ["codex", "exec", *(["resume", session] if session else []), "-", "--json", "--skip-git-repo-check", "-c", 'sandbox_mode="read-only"']
-    if os.getenv("CODEX_MODEL"):
-        cmd += ["-m", os.getenv("CODEX_MODEL")]
-    if os.getenv("CODEX_EFFORT"):
-        cmd += ["-c", f'model_reasoning_effort="{os.getenv("CODEX_EFFORT")}"']
+    if model:
+        cmd += ["-m", model]
+    if effort:
+        cmd += ["-c", f'model_reasoning_effort="{effort}"']
     for image in re.findall(r"\S+\.(?:png|jpe?g)\b", text, re.I):
         cmd += ["-i", os.path.expanduser(image)]
     answer = "Codex stopped without an answer."

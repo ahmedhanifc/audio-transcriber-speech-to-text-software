@@ -118,6 +118,13 @@ def meetings_cli(*args):
     return subprocess.Popen(["node", "script.js", *args], cwd=MEETINGS, start_new_session=True)
 
 
+def chat_agent(path):
+    # Chats from before the agent: line exist; Codex thread ids are UUID v7, Claude's are v4.
+    head = path.read_text().split("\n## ", 1)[0]
+    found = re.search(r"^agent: (\w+)$", head, re.M)
+    return found[1] if found else "codex" if re.match(r"session: \w{8}-\w{4}-7", head) else "claude"
+
+
 class Api:
     def state(self):
         with db() as conn:
@@ -221,7 +228,10 @@ class Api:
     def open_chat(self, name):
         text = (agent.CHATS / name).read_text().split("\n", 1)[1]
         turns = re.split(r"^## (You|Claude)\n", text, flags=re.M)[1:]
-        return [{"role": role, "text": body.strip()} for role, body in zip(turns[::2], turns[1::2])]
+        return {"agent": chat_agent(agent.CHATS / name), "turns": [{"role": role, "text": body.strip()} for role, body in zip(turns[::2], turns[1::2])]}
+
+    def choices(self):
+        return agent.choices()
 
     def save_image(self, data_url):
         # Pasted or dropped images become files, since the agents only take paths.
@@ -232,32 +242,30 @@ class Api:
         path.write_bytes(base64.b64decode(data))
         return str(path)
 
-    def send(self, name, text):
+    def send(self, name, text, who, model, effort):
         # pywebview runs each call in its own thread, so streaming here doesn't freeze the panel.
         import webview
 
         path = agent.CHATS / (name or f"{datetime.now():%Y-%m-%d-%H%M}-{re.sub(r'[^a-z0-9]+', '-', re.sub(r'^Screenshot: .*', '', text, flags=re.M).lower()[:40]).strip('-')}.md")
         session = path.read_text().split("\n", 1)[0].removeprefix("session: ") if path.exists() else None
+        if path.exists():
+            who = chat_agent(path)  # a chat can only continue with the agent that started it
         on_piece = lambda piece: webview.windows[0].evaluate_js(f"onPiece({json.dumps(piece)})")
-        answer, session = agent.ask(text, session, on_piece)
-        body = path.read_text().split("\n", 1)[1] if path.exists() else "\n"
-        path.write_text(f"session: {session}\n{body}## You\n\n{text}\n\n## Claude\n\n{answer}\n\n")
+        answer, session = agent.ask(text, session, on_piece, who, model, effort)
+        body = re.sub(r"\A(?:(?:session|agent): .*\n)+", "", path.read_text()) if path.exists() else "\n"
+        path.write_text(f"session: {session}\nagent: {who}\n{body}## You\n\n{text}\n\n## Claude\n\n{answer}\n\n")
         return path.name
 
     def open_url(self, url):
         if url.startswith(("http://", "https://", f"file://{agent.CHATS / 'images'}/")):
             webbrowser.open(url)
 
-    def typing(self, busy):
-        # The pill reads this to keep the popup open while a text box has focus.
-        print("busy" if busy else "free", flush=True)
-
 
 POPUP_SIZE = (720, 520)
 
 
 def listen(window):
-    # The pill sends "show X Y" and "hide"; stdin closes when the pill exits.
+    # The bubble sends "show X Y" and "hide"; stdin closes when the bubble exits.
     for line in sys.stdin:
         cmd, *args = line.split()
         if cmd == "show":

@@ -41,7 +41,7 @@ validate_linux_session()
 import numpy as np
 import sounddevice as sd
 import pyperclip
-from pynput import keyboard, mouse
+from pynput import keyboard
 from pynput.keyboard import Key, Controller as KeyboardController
 from dotenv import load_dotenv
 from panel import POPUP_SIZE, ROOT, meeting_status, meetings_cli, save_dictation
@@ -82,7 +82,6 @@ SAMPLE_RATE = 16000      # 16kHz mono — perfect for Whisper
 CHANNELS = 1
 DTYPE = "int16"
 MIN_VOLUME = 100        # clips quieter than this are silence; the model invents words for them
-HOVER_MARGIN = (40, 20)  # px left/right and above/below the pill that still count as hovering
 
 kb = KeyboardController() # for simulating paste
 # Platform-specific modifier key for paste.
@@ -222,7 +221,7 @@ def on_release(key):
         recording_key_held = False
 
 
-# ── Tkinter UI (floating indicator) ─────────────────────────────────────────────
+# ── Tkinter UI (floating bubble) ─────────────────────────────────────────────
 def get_monitors():
     """Return (x, y, w, h) for each active monitor. X11 only; empty elsewhere."""
     if not IS_LINUX:
@@ -240,98 +239,94 @@ def get_monitors():
     ]
 
 
+BUBBLE = 44
+COLORS = {"idle": "#26262A", "recording": "#DC143C", "recording_locked": "#B22222", "processing": "#5A5A60", "no_sound": "#B8860B"}
+SPOT_PATH = LOG_PATH.parent / "bubble.txt"
+
+
 class Indicator:
-    """Minimal pill-shaped indicator at bottom-center with hover expansion."""
+    """Round bubble with a waveform. Drag it anywhere; tap it to open or close the panel."""
 
     def __init__(self, root):
         self.root = root
-        self.root.title("")
-        self.root.overrideredirect(True)           # no title bar
-        self.root.attributes("-topmost", True)      # always on top
-        self.root.attributes("-alpha", 0.9)         # slight transparency
-        self.root.configure(bg="gray20")
+        self.root.overrideredirect(True)
+        self.root.attributes("-topmost", True)
+        self.canvas = tk.Canvas(root, width=BUBBLE, height=BUBBLE, highlightthickness=0, cursor="hand2")
+        self.canvas.pack()
+        self.circle = self.canvas.create_oval(0, 0, BUBBLE - 1, BUBBLE - 1, width=3)
+        for i, h in enumerate((8, 14, 20, 14, 8)):
+            x = BUBBLE // 2 + (i - 2) * 6
+            self.canvas.create_line(x, (BUBBLE - h) // 2, x, (BUBBLE + h) // 2, fill="white", width=3, capstyle="round")
+        self.canvas.bind("<ButtonPress-1>", self._press)
+        self.canvas.bind("<B1-Motion>", self._drag)
+        self.canvas.bind("<ButtonRelease-1>", self._release)
 
-        # Cross-platform font setup
-        if IS_MACOS:
-            self.ui_font = ("SF Pro", 11)
-            self.ui_font_small = ("SF Pro", 10)
-        elif IS_WINDOWS:
-            self.ui_font = ("Segoe UI", 11)
-            self.ui_font_small = ("Segoe UI", 10)
-        else:
-            self.ui_font = ("sans-serif", 11)
-            self.ui_font_small = ("sans-serif", 10)
-        
-        # Create a frame for rounded appearance
-        self.frame = tk.Frame(root, bg="gray20", highlightthickness=0)
-        self.frame.pack(fill="both", expand=True)
-
-        self.label = tk.Label(
-            self.frame,
-            text="",  # Start with no text (just a pill)
-            font=self.ui_font,
-            fg="white",
-            bg="gray20",
-            padx=0,
-            pady=0,
-        )
-        self.label.pack()
-
-        # Shown on hover instead of the label.
-        self.buttons = tk.Frame(self.frame, bg="#4A4A4C")
-        self.meeting_btn = tk.Label(self.buttons, font=self.ui_font_small, fg="white", bg="#4A4A4C", padx=8, pady=3, cursor="hand2")
-        self.meeting_btn.pack(side="left")
-        self.meeting_btn.bind("<Button-1>", lambda e: meetings_cli("stop" if self.meeting else "start"))
-
-        # State tracking
         self.current_state = "idle"
-        self.is_hovered = False
         self.meeting = meeting_status()
         self.panel = None
         self.panel_open = False
-        self.panel_busy = False
-        self.panel_box = None
-        self.away_ticks = 0
-        
-        # Position at bottom center - start as small pill
         self.screen_w = self.root.winfo_screenwidth()
         self.screen_h = self.root.winfo_screenheight()
-        # With several monitors the screen spans all of them, so centre on one.
         self.monitors = get_monitors()
 
-
+        x, y = self._home()
+        self.root.geometry(f"{BUBBLE}x{BUBBLE}+{x}+{y}")
+        self._make_round()
         self._start_panel()
-        mouse.Listener(on_click=self._on_click, daemon=True).start()
 
         self._update_display()
         self._poll_queue()
         self._poll_meeting()
-        self._poll_hover()
 
-    def _poll_hover(self):
-        """Hover = pointer within HOVER_MARGIN of the pill, so the 3px line is easy to hit."""
-        px, py = self.root.winfo_pointerxy()
-        x, y = self.root.winfo_rootx(), self.root.winfo_rooty()
-        w, h = self.root.winfo_width(), self.root.winfo_height()
-        mx, my = HOVER_MARGIN
-        near = x - mx <= px <= x + w + mx and y - my <= py <= y + h + my
-        if near != self.is_hovered:
-            self.is_hovered = near
-            self._update_display()
-            if near:
-                self.root.after(300, self._maybe_show_panel)
-        self.root.after(50, self._poll_hover)
+    def _home(self):
+        """The saved spot, or bottom-right if it's gone (say, its monitor was unplugged)."""
+        try:
+            x, y = map(int, SPOT_PATH.read_text().split())
+            if not self.monitors or any(mx <= x < mx + mw and my <= y < my + mh for mx, my, mw, mh in self.monitors):
+                return x, y
+        except (OSError, ValueError):
+            pass
+        mx, my, mw, mh = self._monitor_at(*self.root.winfo_pointerxy())
+        return mx + mw - BUBBLE - 24, my + mh - BUBBLE - 80
+
+    def _make_round(self):
+        """Tk windows are square, so cut this one into a circle with the X11 shape extension."""
+        self.root.update()
+        if not IS_LINUX:
+            return
+        from Xlib.display import Display
+        from Xlib.ext import shape
+        d = Display()
+        win = d.create_resource_object("window", self.root.winfo_id()).query_tree().parent  # Tk's outer wrapper
+        r = BUBBLE / 2
+        rows = [(x, y, BUBBLE - 2 * x, 1) for y in range(BUBBLE) for x in [round(r - (r * r - (y + 0.5 - r) ** 2) ** 0.5)]]
+        win.shape_rectangles(shape.SO.Set, shape.SK.Bounding, 0, 0, 0, rows)
+        d.sync()
+        d.close()
+
+    def _press(self, e):
+        self.start = (e.x_root, e.y_root)
+        self.grab = (e.x_root - self.root.winfo_rootx(), e.y_root - self.root.winfo_rooty())
+        self.dragged = False
+
+    def _drag(self, e):
+        if abs(e.x_root - self.start[0]) + abs(e.y_root - self.start[1]) > 5:
+            self.dragged = True
+        if self.dragged:
+            self.root.geometry(f"+{e.x_root - self.grab[0]}+{e.y_root - self.grab[1]}")
+
+    def _release(self, e):
+        if not self.dragged:
+            self.panel_open = not self.panel_open
+            self._show_panel() if self.panel_open else self._send_panel("hide")
+            return
+        SPOT_PATH.write_text(f"{e.x_root - self.grab[0]} {e.y_root - self.grab[1]}")
+        self.root.update_idletasks()
+        if self.panel_open:
+            self._show_panel()
 
     def _start_panel(self):
-        self.panel = subprocess.Popen(
-            [sys.executable, str(ROOT / "panel.py"), "--popup"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
-        )
-        threading.Thread(target=self._read_panel, args=(self.panel,), daemon=True).start()
-
-    def _read_panel(self, panel):
-        for line in panel.stdout:
-            self.panel_busy = line.strip() == "busy"
+        self.panel = subprocess.Popen([sys.executable, str(ROOT / "panel.py"), "--popup"], stdin=subprocess.PIPE, text=True)
 
     def _send_panel(self, cmd):
         if self.panel.poll() is not None:
@@ -339,159 +334,36 @@ class Indicator:
         self.panel.stdin.write(cmd + "\n")
         self.panel.stdin.flush()
 
-    def _maybe_show_panel(self):
-        if not self.is_hovered or self.panel_open or self.current_state != "idle":
-            return
+    def _show_panel(self):
+        """Next to the bubble, on the side with room, kept inside the bubble's monitor."""
         w, h = POPUP_SIZE
-        mx, my, mw, mh = self._monitor_bounds()
-        x = mx + (mw - w) // 2
-        pill_top = my + mh - 60
-        y = pill_top - h - 8
-        # Panel plus pill; clicks outside this close the panel.
-        self.panel_box = (x, y, x + w, pill_top + 30)
-        self.panel_open = True
-        self.away_ticks = 0
+        bx, by = self.root.winfo_rootx(), self.root.winfo_rooty()
+        mx, my, mw, mh = self._monitor_at(bx + BUBBLE // 2, by + BUBBLE // 2)
+        x = bx + BUBBLE + 8 if bx + BUBBLE + 8 + w <= mx + mw else bx - w - 8
+        x = min(max(x, mx + 8), mx + mw - w - 8)
+        y = min(max(by + BUBBLE // 2 - h // 2, my + 8), my + mh - h - 8)
         self._send_panel(f"show {x} {y}")
-        self._watch_panel()
 
-    def _hide_panel(self):
-        if self.panel_open:
-            self.panel_open = False
-            self.panel_busy = False
-            self._send_panel("hide")
-
-    def _in_panel_box(self, x, y, margin=0):
-        x1, y1, x2, y2 = self.panel_box
-        return x1 - margin <= x <= x2 + margin and y1 - margin <= y <= y2 + margin
-
-    def _watch_panel(self):
-        if not self.panel_open:
-            return
-        near = self._in_panel_box(*self.root.winfo_pointerxy(), margin=40)
-        self.away_ticks = 0 if near or self.panel_busy else self.away_ticks + 1
-        if self.away_ticks >= 3:
-            self._hide_panel()
-            return
-        self.root.after(100, self._watch_panel)
-
-    def _on_click(self, x, y, button, pressed):
-        # pynput thread: hand off to tkinter through the queue.
-        if pressed and self.panel_open and not self._in_panel_box(x, y):
-            ui_queue.put("hide_panel")
-
-    def _set_idle_geometry(self):
-        """Set geometry for idle state - small pill shape."""
-        line_width = 60
-        line_height = 3
-        mx, my, mw, mh = self._monitor_bounds()
-        x = mx + (mw - line_width) // 2
-        y = my + mh - 60
-        self.root.geometry(f"{line_width}x{line_height}+{x}+{y}")
-
-    def _monitor_bounds(self):
-        """Bounds of the monitor under the mouse, or the whole screen if unknown."""
-        px, py = self.root.winfo_pointerxy()
+    def _monitor_at(self, px, py):
+        """Bounds of the monitor holding this point, or the whole screen if unknown."""
         for x, y, w, h in self.monitors:
             if x <= px < x + w and y <= py < y + h:
                 return x, y, w, h
         return 0, 0, self.screen_w, self.screen_h
 
-    def _set_active_geometry(self):
-        """Set geometry for active state - expanded with text."""
-        self.root.update_idletasks()
-        win_w = max(self.frame.winfo_reqwidth(), 140)
-        win_h = max(self.frame.winfo_reqheight(), 24)
-        mx, my, mw, mh = self._monitor_bounds()
-        x = mx + (mw - win_w) // 2
-        y = my + mh - 60
-        self.root.geometry(f"{win_w}x{win_h}+{x}+{y}")
-
     def _update_display(self):
-        """Update the display based on current state and hover."""
-        show_buttons = self.current_state == "idle" and self.is_hovered
-        if show_buttons:
-            self.label.pack_forget()
-            self.buttons.pack()
-        else:
-            self.buttons.pack_forget()
-            self.label.pack()
-
-        if self.current_state == "recording":
-            self.label.config(
-                text="  🔴 Recording...  ",
-                bg="#DC143C",
-                fg="white",
-                padx=10,
-                pady=4,
-                font=self.ui_font
-            )
-            self.root.configure(bg="#DC143C")
-            self.frame.configure(bg="#DC143C")
-            self._set_active_geometry()
-        elif self.current_state == "recording_locked":
-            self.label.config(
-                text="  🔒 Listening...  ",
-                bg="#B22222",
-                fg="white",
-                padx=10,
-                pady=4,
-                font=self.ui_font
-            )
-            self.root.configure(bg="#B22222")
-            self.frame.configure(bg="#B22222")
-            self._set_active_geometry()
-        elif self.current_state == "processing":
-            self.label.config(
-                text="  ⏳ Processing...  ",
-                bg="#2C2C2E",
-                fg="white",
-                padx=10,
-                pady=4,
-                font=self.ui_font
-            )
-            self.root.configure(bg="#2C2C2E")
-            self.frame.configure(bg="#2C2C2E")
-            self._set_active_geometry()
-        elif self.current_state == "no_sound":
-            self.label.config(
-                text="  🔇 No sound - check mic  ",
-                bg="#B8860B",
-                fg="white",
-                padx=10,
-                pady=4,
-                font=self.ui_font
-            )
-            self.root.configure(bg="#B8860B")
-            self.frame.configure(bg="#B8860B")
-            self._set_active_geometry()
+        """Colour shows the state; a red ring means a meeting is recording."""
+        fill = COLORS[self.current_state]
+        ring = "#FF453A" if self.meeting and self.current_state == "idle" else fill
+        self.canvas.configure(bg=fill)
+        self.canvas.itemconfig(self.circle, fill=fill, outline=ring)
+        if self.current_state == "no_sound":
             self.root.after(2000, lambda: self.current_state == "no_sound" and ui_queue.put("idle"))
-        elif show_buttons:
-            self.meeting_btn.config(text="■ Stop meeting" if self.meeting else "● Meeting")
-            self.root.configure(bg="#4A4A4C")
-            self.frame.configure(bg="#4A4A4C")
-            self._set_active_geometry()
-        elif self.current_state == "idle":
-            # Minimal pill, red while a meeting records
-            bg = "#DC143C" if self.meeting else "gray20"
-            self.label.config(
-                text="",
-                bg=bg,
-                fg="white",
-                padx=0,
-                pady=0
-            )
-            self.root.configure(bg=bg)
-            self.frame.configure(bg=bg)
-            self._set_idle_geometry()
 
     def _poll_queue(self):
         """Check the UI queue for state changes."""
         while not ui_queue.empty():
-            state = ui_queue.get_nowait()
-            if state == "hide_panel":
-                self._hide_panel()
-                continue
-            self.current_state = state
+            self.current_state = ui_queue.get_nowait()
             self._update_display()
 
         self.root.after(100, self._poll_queue)  # poll every 100ms

@@ -2,9 +2,9 @@
 
 Press **Right Ctrl** (macOS: Right Command), speak, and press it again. Your words are pasted where your cursor is.
 
-Hover over the pill for **● Meeting** (records mic + speakers, see [`meetings/`](meetings/README.md)). Keep the mouse on it and the panel (meetings, history, notes) pops up above; move away or click elsewhere to close it.
+The round bubble can be dragged anywhere and remembers its spot. Tap it to open the panel (meetings, history, notes, ask) and tap again to close it. It turns red while you dictate, and gets a red ring while a meeting records (mic + speakers, see [`meetings/`](meetings/README.md)).
 
-The panel's **Ask** tab chats with [Claude Code](https://claude.com/claude-code), or Codex if you set `ASK_AGENT=codex` (install it and log in first). It runs read-only, and answers show Markdown and math. To give it context, paste or drop a screenshot into the box (Ctrl+V works), or paste a file path. Screenshots are saved in `chats/images/`. Chats are saved in `chats/`, and you can reopen them from **History → Chats**.
+The panel's **Ask** tab chats with [Claude Code](https://claude.com/claude-code) or Codex (install it and log in first). Pick the agent, model and effort above the chat; an old chat stays with the agent that started it. It runs read-only, and answers show Markdown and math. To give it context, paste or drop a screenshot into the box (Ctrl+V works), or paste a file path. Screenshots are saved in `chats/images/`. Chats are saved in `chats/`, and you can reopen them from **History → Chats**.
 
 ## Install
 

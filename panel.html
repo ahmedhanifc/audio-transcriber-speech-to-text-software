@@ -53,6 +53,8 @@
   @media (prefers-color-scheme: dark) { .pill { background: rgba(255, 255, 255, .12); } }
   #ask:not(.hidden) { display: flex; flex-direction: column; height: 100%; }
   #ask > .row { margin-bottom: 8px; }
+  #ask select { padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--text); font: inherit; }
+  #ask select:disabled { opacity: .5; }
   #chat-list .card { cursor: pointer; }
   #messages { flex: 1; overflow-y: auto; position: relative; }
   #ask-box { min-height: 64px; margin: 8px 0 0; resize: none; }
@@ -124,6 +126,10 @@
   <section id="ask" class="hidden">
     <div class="row">
       <button class="act" id="new-chat">New chat</button>
+      <select id="who" title="Agent"><option value="claude">Claude</option><option value="codex">Codex</option></select>
+      <select id="model" title="Model"></select>
+      <select id="effort" title="Effort"></select>
+      <span class="muted" id="locked"></span>
     </div>
     <div id="messages"></div>
     <div id="attached" class="shots" title="Click a screenshot to remove it"></div>
@@ -406,9 +412,33 @@
     }, el('div', { textContent: n.slice(16, -3).replace(/-/g, ' ') }), el('div', { className: 'muted', textContent: n.slice(0, 10) }))));
   }
 
+  // Agent -> model -> efforts; "" is the CLI's own setting. Each agent keeps its own model and effort.
+  let choices = null;
+  const who = document.getElementById('who');
+  const model = document.getElementById('model');
+  const effort = document.getElementById('effort');
+  const options = (select, values, value) => {
+    select.replaceChildren(...values.map((v) => el('option', { value: v, textContent: v || 'Default' })));
+    select.value = values.includes(value) ? value : '';
+  };
+  const pickModel = () => options(effort, ['', ...choices[who.value][model.value]], choices.default[who.value][1]);
+  const pickAgent = () => { options(model, Object.keys(choices[who.value]), choices.default[who.value][0]); pickModel(); };
+  who.onchange = pickAgent;
+  model.onchange = () => { choices.default[who.value][0] = model.value; pickModel(); };
+  effort.onchange = () => choices.default[who.value][1] = effort.value;
+
+  // An open chat can only continue with the agent that started it.
+  function lockAgent(agent) {
+    if (agent && who.value !== agent) { who.value = agent; pickAgent(); }
+    who.disabled = !!agent;
+    document.getElementById('locked').textContent = agent ? `This chat stays with ${who.selectedOptions[0].textContent}` : '';
+  }
+
   async function openChat(name) {
     chat = name;
-    messages.replaceChildren(...(name ? await pywebview.api.open_chat(name) : []).map((t) => message(t.role, t.text)));
+    const opened = name ? await pywebview.api.open_chat(name) : { agent: null, turns: [] };
+    lockAgent(opened.agent);
+    messages.replaceChildren(...opened.turns.map((t) => message(t.role, t.text)));
     toBottom();
   }
 
@@ -436,7 +466,7 @@
     messages.append(message('You', text), live);
     toBottom();
     try {
-      const name = await pywebview.api.send(from, text);
+      const name = await pywebview.api.send(from, text, who.value, model.value, effort.value);
       live = null;
       if (chat === from) openChat(name);
     } catch (err) {
@@ -524,10 +554,10 @@
     renderBoard();
   });
 
-  document.addEventListener('focusin', (e) => e.target.matches('input, textarea') && pywebview.api.typing(true));
-  document.addEventListener('focusout', (e) => e.target.matches('input, textarea') && pywebview.api.typing(false));
-
-  window.addEventListener('pywebviewready', () => {
+  window.addEventListener('pywebviewready', async () => {
+    choices = await pywebview.api.choices();
+    who.value = choices.default.agent;
+    pickAgent();
     refresh();
     setInterval(refresh, 2000);
     setInterval(tick, 1000);
