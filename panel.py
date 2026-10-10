@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import re
@@ -222,11 +223,20 @@ class Api:
         turns = re.split(r"^## (You|Claude)\n", text, flags=re.M)[1:]
         return [{"role": role, "text": body.strip()} for role, body in zip(turns[::2], turns[1::2])]
 
+    def save_image(self, data_url):
+        # Pasted or dropped images become files, since the agents only take paths.
+        head, data = data_url.split(",", 1)
+        ext = head.split("/")[1].split(";")[0].replace("jpeg", "jpg")
+        path = agent.CHATS / "images" / f"{datetime.now():%Y-%m-%d-%H%M%S-%f}.{ext}"
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(base64.b64decode(data))
+        return str(path)
+
     def send(self, name, text):
         # pywebview runs each call in its own thread, so streaming here doesn't freeze the panel.
         import webview
 
-        path = agent.CHATS / (name or f"{datetime.now():%Y-%m-%d-%H%M}-{re.sub(r'[^a-z0-9]+', '-', text.lower()[:40]).strip('-')}.md")
+        path = agent.CHATS / (name or f"{datetime.now():%Y-%m-%d-%H%M}-{re.sub(r'[^a-z0-9]+', '-', re.sub(r'^Screenshot: .*', '', text, flags=re.M).lower()[:40]).strip('-')}.md")
         session = path.read_text().split("\n", 1)[0].removeprefix("session: ") if path.exists() else None
         on_piece = lambda piece: webview.windows[0].evaluate_js(f"onPiece({json.dumps(piece)})")
         answer, session = agent.ask(text, session, on_piece)
@@ -235,7 +245,7 @@ class Api:
         return path.name
 
     def open_url(self, url):
-        if url.startswith(("http://", "https://")):
+        if url.startswith(("http://", "https://", f"file://{agent.CHATS / 'images'}/")):
             webbrowser.open(url)
 
     def typing(self, busy):
@@ -266,8 +276,8 @@ if __name__ == "__main__":
     backup()
     if "--popup" in sys.argv:
         w, h = POPUP_SIZE
-        window = webview.create_window("Audio Transcriber", str(ROOT / "panel.html"), js_api=Api(), width=w, height=h, frameless=True, on_top=True, hidden=True)
+        window = webview.create_window("Audio Transcriber", str(ROOT / "panel.html"), js_api=Api(), text_select=True, width=w, height=h, frameless=True, on_top=True, hidden=True)
         webview.start(listen, window, gui="qt")
     else:
-        webview.create_window("Audio Transcriber", str(ROOT / "panel.html"), js_api=Api(), width=760, height=640)
+        webview.create_window("Audio Transcriber", str(ROOT / "panel.html"), js_api=Api(), text_select=True, width=760, height=640)
         webview.start(gui="qt")

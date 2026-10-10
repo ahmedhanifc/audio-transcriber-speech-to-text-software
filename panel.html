@@ -24,6 +24,7 @@
   .muted { color: var(--muted); font-size: 12px; }
   input, textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; }
   textarea { min-height: 90px; resize: vertical; margin-bottom: 8px; }
+  button { user-select: none; }
   button.act { padding: 7px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--text); font: inherit; cursor: pointer; white-space: nowrap; }
   button.main { background: var(--accent); color: var(--bg); border-color: var(--accent); }
   button.stop { background: var(--red); color: #fff; border-color: var(--red); }
@@ -55,8 +56,16 @@
   #chat-list .card { cursor: pointer; }
   #messages { flex: 1; overflow-y: auto; position: relative; }
   #ask-box { min-height: 64px; margin: 8px 0 0; resize: none; }
+  .shots { display: flex; flex-wrap: wrap; gap: 6px; }
+  .shots:not(:empty) { margin-top: 8px; }
+  .shots img { max-height: 120px; max-width: 100%; border-radius: 6px; border: 1px solid var(--line); cursor: pointer; }
+  #attached img { height: 56px; }
+  #ask-box.drop { border-color: var(--accent); }
   .md { margin-bottom: 14px; overflow-wrap: break-word; }
   .md pre { white-space: pre; overflow-x: auto; max-height: none; margin: 8px 0; padding: 10px; border: 0; border-radius: 8px; background: var(--card); }
+  .md .code { position: relative; }
+  .md .code > .act { position: absolute; top: 6px; right: 6px; padding: 2px 8px; font-size: 12px; opacity: 0; }
+  .md .code:hover > .act { opacity: 1; }
   .md code { font: 12px ui-monospace, monospace; }
   .md table { border-collapse: collapse; }
   .md th, .md td { border: 1px solid var(--line); padding: 4px 8px; }
@@ -117,7 +126,8 @@
       <button class="act" id="new-chat">New chat</button>
     </div>
     <div id="messages"></div>
-    <textarea id="ask-box" placeholder="Ask anything. Paste file or screenshot paths. Enter sends, Shift+Enter is a new line."></textarea>
+    <div id="attached" class="shots" title="Click a screenshot to remove it"></div>
+    <textarea id="ask-box" placeholder="Ask anything. Paste or drop screenshots, or paste file paths. Enter sends, Shift+Enter is a new line."></textarea>
   </section>
 </main>
 <script>
@@ -353,9 +363,41 @@
     document.fonts.ready.then(() => messages.scrollTop = messages.scrollHeight);
   };
 
-  const message = (role, text) => role === 'You'
-    ? el('div', { className: 'card text', textContent: text })
-    : el('div', { className: 'md', innerHTML: md(text) });
+  // Attached screenshots travel in the message as "Screenshot: <path>" lines, so the agent can read them.
+  const SHOT = /^Screenshot: (.+)$/gm;
+  const shot = (path, onclick) => el('img', { src: 'chats/images/' + path.split('/').pop(), onclick });
+  const attached = document.getElementById('attached');
+  let shots = []; // saved paths of screenshots waiting to be sent
+
+  function renderAttached() {
+    attached.replaceChildren(...shots.map((p) => shot(p, () => { shots = shots.filter((x) => x !== p); renderAttached(); })));
+  }
+
+  async function attach(files) {
+    for (const file of [...files].filter((f) => f.type.startsWith('image/'))) {
+      const url = await new Promise((done) => { const r = new FileReader(); r.onload = () => done(r.result); r.readAsDataURL(file); });
+      shots.push(await pywebview.api.save_image(url));
+      renderAttached();
+    }
+  }
+
+  // Each code block gets a Copy button, so commands don't have to be selected by hand.
+  function withCopy(node) {
+    node.querySelectorAll('pre').forEach((pre) => {
+      const wrap = el('div', { className: 'code' });
+      pre.replaceWith(wrap);
+      wrap.append(pre, copyButton('Copy', pre.textContent));
+    });
+    return node;
+  }
+
+  function message(role, text) {
+    if (role !== 'You') return withCopy(el('div', { className: 'md', innerHTML: md(text) }));
+    const paths = [...text.matchAll(SHOT)].map((m) => m[1]);
+    const body = text.replace(SHOT, '').trim();
+    return el('div', { className: 'card' }, body ? el('div', { className: 'text', textContent: body }) : '',
+      el('div', { className: 'shots' }, ...paths.map((p) => shot(p, () => pywebview.api.open_url('file://' + p)))));
+  }
 
   async function loadChats() {
     const names = await pywebview.api.chats();
@@ -374,15 +416,19 @@
     liveText += piece;
     live.className = 'md';
     live.innerHTML = md(liveText);
+    withCopy(live);
     toBottom();
   }
 
   askBox.onkeydown = async (e) => {
     if (e.key !== 'Enter' || e.shiftKey) return;
     e.preventDefault();
-    const text = askBox.value.trim();
-    if (!text || live) return;
+    let text = askBox.value.trim();
+    if ((!text && !shots.length) || live) return;
+    if (shots.length) text = [text || 'See the attached screenshot.', ...shots.map((p) => 'Screenshot: ' + p)].join('\n');
     askBox.value = '';
+    shots = [];
+    renderAttached();
     const from = chat;
     live = el('div', { className: 'md muted', textContent: 'Thinking…' });
     liveText = '';
@@ -396,6 +442,20 @@
       live.textContent = 'Error: ' + err;
       live = null;
     }
+  };
+
+  askBox.onpaste = (e) => {
+    if (![...e.clipboardData.files].some((f) => f.type.startsWith('image/'))) return;
+    e.preventDefault();
+    attach(e.clipboardData.files);
+  };
+  askBox.ondragover = (e) => { e.preventDefault(); askBox.classList.add('drop'); };
+  askBox.ondragleave = () => askBox.classList.remove('drop');
+  askBox.ondrop = (e) => {
+    askBox.classList.remove('drop');
+    if (![...e.dataTransfer.files].some((f) => f.type.startsWith('image/'))) return;
+    e.preventDefault();
+    attach(e.dataTransfer.files);
   };
 
   document.getElementById('new-chat').onclick = () => { openChat(null); askBox.focus(); };
