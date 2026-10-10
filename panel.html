@@ -74,7 +74,7 @@
 </style>
 </head>
 <body>
-<nav>
+<nav class="pywebview-drag-region">
   <button data-tab="meetings" class="on">Meetings</button>
   <button data-tab="history">History</button>
   <button data-tab="notes">Notes</button>
@@ -413,11 +413,12 @@
   }
 
   function onPiece(piece) {
+    const atBottom = messages.scrollHeight - messages.scrollTop - messages.clientHeight < 30;
     liveText += piece;
     live.className = 'md';
     live.innerHTML = md(liveText);
     withCopy(live);
-    toBottom();
+    if (atBottom) toBottom();
   }
 
   askBox.onkeydown = async (e) => {

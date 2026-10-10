@@ -276,7 +276,7 @@ if __name__ == "__main__":
     backup()
     if "--popup" in sys.argv:
         w, h = POPUP_SIZE
-        window = webview.create_window("Audio Transcriber", str(ROOT / "panel.html"), js_api=Api(), text_select=True, width=w, height=h, frameless=True, on_top=True, hidden=True)
+        window = webview.create_window("Audio Transcriber", str(ROOT / "panel.html"), js_api=Api(), text_select=True, width=w, height=h, frameless=True, easy_drag=False, on_top=True, hidden=True)
         webview.start(listen, window, gui="qt")
     else:
         webview.create_window("Audio Transcriber", str(ROOT / "panel.html"), js_api=Api(), text_select=True, width=760, height=640)
