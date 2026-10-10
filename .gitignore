@@ -238,3 +238,4 @@ docs/
 # Ask tab chats (personal)
 chats/*
 !chats/CLAUDE.md
+!chats/AGENTS.md

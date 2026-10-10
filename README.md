@@ -4,7 +4,7 @@ Press **Right Ctrl** (macOS: Right Command), speak, and press it again. Your wor
 
 Hover over the pill for **● Meeting** (records mic + speakers, see [`meetings/`](meetings/README.md)). Keep the mouse on it and the panel (meetings, history, notes) pops up above; move away or click elsewhere to close it.
 
-The panel's **Ask** tab chats with [Claude Code](https://claude.com/claude-code) (install it and log in first). It runs read-only, and answers show Markdown and math. To give it context, paste a file or screenshot path into your message. Chats are saved in `chats/`.
+The panel's **Ask** tab chats with [Claude Code](https://claude.com/claude-code), or Codex if you set `ASK_AGENT=codex` (install it and log in first). It runs read-only, and answers show Markdown and math. To give it context, paste a file or screenshot path into your message. Chats are saved in `chats/`, and you can reopen them from **History → Chats**.
 
 ## Install
 
