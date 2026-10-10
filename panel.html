@@ -52,17 +52,20 @@
   .pill { padding: 2px 10px; border: 0; border-radius: 99px; background: rgba(0, 0, 0, .08); color: var(--text); font: inherit; font-size: 12px; cursor: pointer; }
   @media (prefers-color-scheme: dark) { .pill { background: rgba(255, 255, 255, .12); } }
   #ask:not(.hidden) { display: flex; flex-direction: column; height: 100%; }
-  #ask > .row { margin-bottom: 8px; }
-  #ask select { padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--text); font: inherit; }
-  #ask select:disabled { opacity: .5; }
+  #new-chat { align-self: flex-end; display: flex; padding: 6px; border: 0; border-radius: 8px; background: none; color: var(--muted); cursor: pointer; }
+  #new-chat:hover { background: var(--card); color: var(--text); }
+  #composer { margin-top: 8px; padding: 0 10px 6px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+  #composer:focus-within, #composer.drop { border-color: var(--accent); }
+  #composer select { padding: 2px 4px; border: 0; border-radius: 6px; background: none; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
+  #composer select:hover { background: var(--bg); color: var(--text); }
+  #composer select:disabled { opacity: .5; cursor: default; }
   #chat-list .card { cursor: pointer; }
   #messages { flex: 1; overflow-y: auto; position: relative; }
-  #ask-box { min-height: 64px; margin: 8px 0 0; resize: none; }
+  #ask-box { min-height: 64px; margin: 0; padding: 10px 0 4px; border: 0; background: none; resize: none; outline: none; }
   .shots { display: flex; flex-wrap: wrap; gap: 6px; }
   .shots:not(:empty) { margin-top: 8px; }
   .shots img { max-height: 120px; max-width: 100%; border-radius: 6px; border: 1px solid var(--line); cursor: pointer; }
   #attached img { height: 56px; }
-  #ask-box.drop { border-color: var(--accent); }
   .md { margin-bottom: 14px; overflow-wrap: break-word; }
   .md pre { white-space: pre; overflow-x: auto; max-height: none; margin: 8px 0; padding: 10px; border: 0; border-radius: 8px; background: var(--card); }
   .md .code { position: relative; }
@@ -124,16 +127,17 @@
     </div>
   </section>
   <section id="ask" class="hidden">
-    <div class="row">
-      <button class="act" id="new-chat">New chat</button>
-      <select id="who" title="Agent"><option value="claude">Claude</option><option value="codex">Codex</option></select>
-      <select id="model" title="Model"></select>
-      <select id="effort" title="Effort"></select>
-      <span class="muted" id="locked"></span>
-    </div>
+    <button id="new-chat" title="New chat"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/></svg></button>
     <div id="messages"></div>
-    <div id="attached" class="shots" title="Click a screenshot to remove it"></div>
-    <textarea id="ask-box" placeholder="Ask anything. Paste or drop screenshots, or paste file paths. Enter sends, Shift+Enter is a new line."></textarea>
+    <div id="composer">
+      <div id="attached" class="shots" title="Click a screenshot to remove it"></div>
+      <textarea id="ask-box" placeholder="Ask anything. Paste or drop screenshots, or paste file paths. Enter sends, Shift+Enter is a new line."></textarea>
+      <div class="row">
+        <select id="who" title="Agent"><option value="claude">Claude</option><option value="codex">Codex</option></select>
+        <select id="model" title="Model"></select>
+        <select id="effort" title="Effort"></select>
+      </div>
+    </div>
   </section>
 </main>
 <script>
@@ -351,6 +355,7 @@
   let liveText = '';
   const messages = document.getElementById('messages');
   const askBox = document.getElementById('ask-box');
+  const composer = document.getElementById('composer');
 
   // Show raw HTML from answers as text, so it can't run scripts in the panel.
   marked.use({ renderer: { html: ({ text }) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;') } });
@@ -431,7 +436,7 @@
   function lockAgent(agent) {
     if (agent && who.value !== agent) { who.value = agent; pickAgent(); }
     who.disabled = !!agent;
-    document.getElementById('locked').textContent = agent ? `This chat stays with ${who.selectedOptions[0].textContent}` : '';
+    who.title = agent ? `This chat stays with ${who.selectedOptions[0].textContent}` : 'Agent';
   }
 
   async function openChat(name) {
@@ -480,10 +485,10 @@
     e.preventDefault();
     attach(e.clipboardData.files);
   };
-  askBox.ondragover = (e) => { e.preventDefault(); askBox.classList.add('drop'); };
-  askBox.ondragleave = () => askBox.classList.remove('drop');
+  askBox.ondragover = (e) => { e.preventDefault(); composer.classList.add('drop'); };
+  askBox.ondragleave = () => composer.classList.remove('drop');
   askBox.ondrop = (e) => {
-    askBox.classList.remove('drop');
+    composer.classList.remove('drop');
     if (![...e.dataTransfer.files].some((f) => f.type.startsWith('image/'))) return;
     e.preventDefault();
     attach(e.dataTransfer.files);
