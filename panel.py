@@ -3,7 +3,7 @@ import os
 import sqlite3
 import subprocess
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pyperclip
@@ -14,6 +14,7 @@ MEETINGS = ROOT / "meetings"
 DB_PATH = MEETINGS / "data" / "meetings.db"
 PID_FILE = MEETINGS / "data" / "recorder.pid"
 FIELDS = ("did", "learned", "blocked", "better", "people")
+ARCHIVED = "status = 'done' AND done_at < ?"
 
 
 def db():
@@ -50,6 +51,9 @@ def db():
             INSERT INTO reflections_fts(rowid, did, learned, blocked, better, people) VALUES (new.rowid, new.did, new.learned, new.blocked, new.better, new.people);
         END;
     """)
+    if "status" not in {r["name"] for r in conn.execute("PRAGMA table_info(notes)")}:
+        conn.execute("ALTER TABLE notes ADD COLUMN status TEXT NOT NULL DEFAULT 'todo'")
+        conn.execute("ALTER TABLE notes ADD COLUMN done_at TEXT")
     if first_run:
         conn.execute("INSERT INTO notes_fts(notes_fts) VALUES ('rebuild')")
         conn.execute("INSERT INTO reflections_fts(reflections_fts) VALUES ('rebuild')")
@@ -69,6 +73,10 @@ def backup():
     with db() as conn:
         conn.backup(out)
     out.close()
+
+
+def archive_cutoff():
+    return (datetime.now() - timedelta(days=3)).isoformat()
 
 
 def save_dictation(text):
@@ -116,7 +124,7 @@ class Api:
                 "recording": meeting_status(),
                 "meetings": meetings,
                 "dictations": rows("SELECT * FROM dictations ORDER BY id DESC"),
-                "notes": rows("SELECT * FROM notes ORDER BY id DESC"),
+                "notes": [dict(r) for r in conn.execute(f"SELECT * FROM notes WHERE NOT ({ARCHIVED}) ORDER BY id", (archive_cutoff(),))],
             }
 
     def start_meeting(self, title):
@@ -158,6 +166,10 @@ class Api:
         with db() as conn:
             conn.execute("UPDATE notes SET text = ? WHERE id = ?", (text, id))
 
+    def set_note_status(self, id, status):
+        with db() as conn:
+            conn.execute("UPDATE notes SET status = ?, done_at = ? WHERE id = ?", (status, datetime.now().isoformat() if status == "done" else None, id))
+
     def delete_note(self, id):
         with db() as conn:
             conn.execute("DELETE FROM notes WHERE id = ?", (id,))
@@ -193,8 +205,8 @@ class Api:
         with db() as conn:
             reflections = {r["day"]: dict(r) for r in conn.execute("SELECT * FROM reflections")}
             notes = {}
-            for n in conn.execute("SELECT * FROM notes ORDER BY id"):
-                notes.setdefault(n["created_at"][:10], []).append(dict(n))
+            for n in conn.execute(f"SELECT * FROM notes WHERE {ARCHIVED} ORDER BY done_at", (archive_cutoff(),)):
+                notes.setdefault(n["done_at"][:10], []).append(dict(n))
         return [{"day": d, "reflection": reflections.get(d), "notes": notes.get(d, [])} for d in sorted(reflections.keys() | notes.keys(), reverse=True)]
 
     def typing(self, busy):

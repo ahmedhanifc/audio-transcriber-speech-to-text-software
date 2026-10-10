@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <title>Audio Transcriber</title>
 <style>
-  :root { --bg: #f7f7f5; --card: #fff; --text: #1d1d1f; --muted: #6e6e73; --line: #e5e5e5; --accent: #1d1d1f; --red: #d93025; }
+  :root { --bg: #f7f7f5; --card: #fff; --text: #1d1d1f; --muted: #6e6e73; --line: #e5e5e5; --accent: #1d1d1f; --red: #d93025; --todo: #fff3bf; --doing: #dbeafe; --done: #dcfce7; }
   @media (prefers-color-scheme: dark) {
-    :root { --bg: #1c1c1e; --card: #2c2c2e; --text: #f2f2f7; --muted: #98989d; --line: #3a3a3c; --accent: #f2f2f7; }
+    :root { --bg: #1c1c1e; --card: #2c2c2e; --text: #f2f2f7; --muted: #98989d; --line: #3a3a3c; --accent: #f2f2f7; --todo: #4a4126; --doing: #1f3a5c; --done: #1f4030; }
   }
   * { box-sizing: border-box; }
   body { margin: 0; font: 14px/1.45 system-ui, sans-serif; background: var(--bg); color: var(--text); display: flex; height: 100vh; }
@@ -30,11 +30,23 @@
   .text { white-space: pre-wrap; }
   .hidden { display: none; }
   .tabs { margin-bottom: 12px; }
-  .tabs button.on { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  .tabs button.on, .chips button.on { background: var(--accent); color: var(--bg); border-color: var(--accent); }
   label { display: block; font-weight: 600; }
   label textarea { min-height: 60px; margin-top: 4px; font-weight: normal; }
   h3 { font-size: 15px; margin: 0 0 8px; }
   .entry { margin-top: 8px; }
+  .chips { margin-bottom: 12px; gap: 6px; }
+  .chips .act { padding: 3px 10px; border-radius: 99px; font-size: 12px; }
+  .board { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; align-items: start; }
+  .sticky { min-height: 110px; padding: 12px; border-radius: 10px; display: flex; flex-direction: column; gap: 10px; cursor: text; box-shadow: 0 1px 2px rgba(0, 0, 0, .08); }
+  .sticky .text { flex: 1; }
+  .sticky.todo { background: var(--todo); }
+  .sticky.doing { background: var(--doing); }
+  .sticky.done { background: var(--done); opacity: .6; }
+  .sticky.add { align-items: center; justify-content: center; font-size: 28px; color: var(--muted); border: 1px dashed var(--line); box-shadow: none; cursor: pointer; }
+  .sticky textarea { flex: 1; min-height: 86px; margin: 0; padding: 0; border: 0; background: none; resize: none; outline: none; }
+  .pill { padding: 2px 10px; border: 0; border-radius: 99px; background: rgba(0, 0, 0, .08); color: var(--text); font: inherit; font-size: 12px; cursor: pointer; }
+  @media (prefers-color-scheme: dark) { .pill { background: rgba(255, 255, 255, .12); } }
   mark { background: #ffe58f; color: #1d1d1f; border-radius: 3px; }
 </style>
 </head>
@@ -62,11 +74,13 @@
       <button class="act" data-sub="past">Past</button>
     </div>
     <div id="inbox" class="sub">
-      <div class="card">
-        <textarea id="note" placeholder=""></textarea>
-        <button class="act main" id="save-note">Save note</button>
+      <div class="row chips">
+        <button class="act on" data-filter="">All</button>
+        <button class="act" data-filter="todo">To do</button>
+        <button class="act" data-filter="doing">Doing</button>
+        <button class="act" data-filter="done">Done</button>
       </div>
-      <div id="note-list"></div>
+      <div id="board" class="board"></div>
     </div>
     <div id="today" class="sub hidden">
       <div class="card" id="reflection">
@@ -85,6 +99,9 @@
   const open = new Set();
   let editing = null; // meeting id being renamed: re-rendering would steal the input
   let editingNote = null;
+  let filter = '';
+  const STATUS = { todo: 'To do', doing: 'Doing', done: 'Done' };
+  const NEXT = { todo: 'doing', doing: 'done', done: 'todo' };
   const LABELS = { did: 'What I did', learned: 'What I learned', blocked: 'What blocked me', better: 'What to do better', people: 'People' };
   const today = () => new Date().toLocaleDateString('en-CA');
 
@@ -212,25 +229,49 @@
     box.focus();
   }
 
-  function editNote(n, card) {
-    editingNote = n.id;
-    const box = el('textarea', { value: n.text });
-    const done = async (save) => {
-      editingNote = null;
+  // n is null for a new note. Clearing a note's text deletes it.
+  function editSticky(n, card) {
+    editingNote = n ? n.id : 'new';
+    const box = el('textarea', { value: n ? n.text : '' });
+    box.onblur = async () => {
       const text = box.value.trim();
-      if (save && text && text !== n.text) await pywebview.api.update_note(n.id, text);
+      if (!n && text) await pywebview.api.add_note(text);
+      else if (n && !text) await pywebview.api.delete_note(n.id);
+      else if (n && text !== n.text) await pywebview.api.update_note(n.id, text);
+      editingNote = null;
       refresh(true);
     };
-    card.replaceWith(el('div', { className: 'card' }, box, el('div', { className: 'row' }, button('Save', 'main', () => done(true)), button('Cancel', '', () => done(false)))));
+    box.onkeydown = (e) => {
+      if (e.key === 'Escape') box.value = n ? n.text : '';
+      if (e.key === 'Escape' || (e.key === 'Enter' && e.ctrlKey)) box.blur();
+    };
+    card.onclick = null;
+    card.className = 'sticky ' + (n ? n.status : 'todo');
+    card.replaceChildren(box);
     box.focus();
     box.setSelectionRange(box.value.length, box.value.length);
   }
 
-  function renderList(id, items, onDelete, onEdit) {
+  function renderBoard() {
+    const add = el('div', { className: 'sticky add', textContent: '+', onclick: (e) => editSticky(null, e.currentTarget) });
+    document.getElementById('board').replaceChildren(...state.notes.filter((n) => !filter || n.status === filter).map((n) =>
+      el('div', { className: 'sticky ' + n.status, onclick: (e) => editSticky(n, e.currentTarget) },
+        el('div', { className: 'text', textContent: n.text }),
+        el('div', { className: 'row' },
+          el('button', { className: 'pill', textContent: STATUS[n.status], onclick: async (e) => {
+            e.stopPropagation();
+            await pywebview.api.set_note_status(n.id, NEXT[n.status]);
+            refresh();
+          } }),
+          el('span', { className: 'muted grow', textContent: new Date(n.created_at).toLocaleDateString() }),
+        ),
+      )), add);
+  }
+
+  function renderList(id, items, onDelete) {
     document.getElementById(id).replaceChildren(...items.map((d) => el('div', { className: 'card row' },
       el('div', { className: 'grow' }, el('div', { className: 'text', textContent: d.text }), el('div', { className: 'muted', textContent: when(d.created_at) })),
       copyButton('Copy', d.text),
-      onEdit ? button('Edit', '', (e) => onEdit(d, e.target.closest('.card'))) : '',
       button('Delete', '', async () => { await onDelete(d.id); refresh(); }),
     )));
   }
@@ -243,7 +284,7 @@
     // A focused "Add to minutes" box would lose its text if the list re-rendered.
     if (!editing && (force || !document.getElementById('meeting-list').contains(document.activeElement))) renderMeetings();
     renderList('dictation-list', state.dictations, (id) => pywebview.api.delete_dictation(id));
-    if (editingNote === null) renderList('note-list', state.notes, (id) => pywebview.api.delete_note(id), editNote);
+    if (editingNote === null) renderBoard();
   }
 
   async function refresh(force = false) {
@@ -292,8 +333,10 @@
           el('h3', { textContent: d.day }),
           ...Object.entries(LABELS).filter(([f]) => d.reflection?.[f]).map(([f, label]) =>
             el('div', { className: 'entry' }, el('div', { className: 'muted', textContent: label }), el('div', { className: 'text', textContent: d.reflection[f] }))),
-          ...d.notes.map((n) => el('div', { className: 'entry' },
-            el('div', { className: 'muted', textContent: 'Note · ' + new Date(n.created_at).toLocaleTimeString() }), el('div', { className: 'text', textContent: n.text }))),
+          ...d.notes.map((n) => el('div', { className: 'entry row' },
+            el('div', { className: 'grow' }, el('div', { className: 'muted', textContent: 'Done · ' + new Date(n.done_at).toLocaleTimeString() }), el('div', { className: 'text', textContent: n.text })),
+            button('Restore', '', async () => { await pywebview.api.set_note_status(n.id, 'todo'); loadPast(); refresh(); }),
+            button('Delete', '', async () => { await pywebview.api.delete_note(n.id); loadPast(); }))),
         ));
     if (q === search.value.trim()) document.getElementById('past-list').replaceChildren(...cards); // drop stale results
   }
@@ -307,13 +350,11 @@
     if (b.dataset.sub === 'past') loadPast();
   });
 
-  document.getElementById('save-note').onclick = async () => {
-    const note = document.getElementById('note');
-    if (!note.value.trim()) return;
-    await pywebview.api.add_note(note.value.trim());
-    note.value = '';
-    refresh();
-  };
+  document.querySelectorAll('.chips button').forEach((b) => b.onclick = () => {
+    document.querySelectorAll('.chips button').forEach((x) => x.classList.toggle('on', x === b));
+    filter = b.dataset.filter;
+    renderBoard();
+  });
 
   document.addEventListener('focusin', (e) => e.target.matches('input, textarea') && pywebview.api.typing(true));
   document.addEventListener('focusout', (e) => e.target.matches('input, textarea') && pywebview.api.typing(false));
